@@ -22,6 +22,7 @@
     "@tailwindcss/postcss": "^4.2.1",
     "clsx": "^2.1.1",
     "geist": "^1.7.0",
+    "nanoid": "^5.1.6",
     "next": "16.2.1",
     "polygon-clipping": "^0.15.7",
     "postcss": "^8.5.6",
