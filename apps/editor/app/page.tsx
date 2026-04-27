@@ -10,6 +10,7 @@ import { useSeedDefaultMetadata } from '../bimai/lib/seed'
 import { ProgramPanel } from '../bimai/panels/program-panel'
 import { ProjectPanel } from '../bimai/panels/project-panel'
 import { ZoningPanel } from '../bimai/panels/zoning-panel'
+import { EnvelopeRenderer } from '../bimai/viewer/buildable-envelope/envelope-renderer'
 
 const SIDEBAR_TABS: (SidebarTab & { component: React.ComponentType })[] = [
   {
@@ -32,6 +33,7 @@ export default function Home() {
         sidebarTabs={SIDEBAR_TABS}
         viewerToolbarLeft={<ViewerToolbarLeft />}
         viewerToolbarRight={<ViewerToolbarRight />}
+        viewerSceneSlot={<EnvelopeRenderer />}
       />
     </div>
   )
