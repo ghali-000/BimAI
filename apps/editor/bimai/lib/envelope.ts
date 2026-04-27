@@ -7,28 +7,7 @@ export type Polygon2D = Point2D[]
 
 export type EnvelopeResult =
   | { ok: true; polygon: Polygon2D; area: number }
-  | { ok: false; reason: 'envelope_collapsed' | 'invalid_plot' }
-
-interface BBox {
-  minX: number
-  minY: number
-  maxX: number
-  maxY: number
-}
-
-function boundingBox(poly: Polygon2D): BBox {
-  let minX = Infinity
-  let minY = Infinity
-  let maxX = -Infinity
-  let maxY = -Infinity
-  for (const [x, y] of poly) {
-    if (x < minX) minX = x
-    if (y < minY) minY = y
-    if (x > maxX) maxX = x
-    if (y > maxY) maxY = y
-  }
-  return { minX, minY, maxX, maxY }
-}
+  | { ok: false; reason: 'plot_too_small' | 'invalid_plot' }
 
 // Signed area: positive when CCW (in standard math axes; here our XZ plane).
 function signedArea(poly: Polygon2D): number {
@@ -102,8 +81,9 @@ function insetPolygon(poly: Polygon2D, distance: number): Polygon2D {
 }
 
 // Compute the buildable envelope: plot polygon offset inward by uniform setback
-// (mean of front/side/rear). Validates with polygon-clipping intersection
-// against the original plot to discard collapsed/inverted geometry.
+// (mean of front/side/rear). Validity is decided by a single source of truth —
+// polygonClipping.difference(inset, plot): if any part of the analytic inset
+// lies outside the plot, the setback consumed too much and we reject.
 export function computeEnvelope(
   plotPolygon: Polygon2D,
   zoning: ZoningRules,
@@ -118,30 +98,22 @@ export function computeEnvelope(
     return { ok: true, polygon: plotPolygon, area: plotArea }
   }
 
-  const inset = insetPolygon(plotPolygon, d)
-  // When setbacks exceed the plot's half-width, the analytic offset produces
-  // an inverted/oversized polygon (vertices fall outside the plot). Detect
-  // that by checking the inset's bounding box against the plot's: if it's
-  // not fully contained, the offset collapsed. signedArea / Math.abs both
-  // miss this because the resulting polygon can still be simple and CCW.
-  const plotBounds = boundingBox(plotPolygon)
-  const insetBounds = boundingBox(inset)
-  const eps = 1e-6
-  const contained =
-    insetBounds.minX >= plotBounds.minX - eps &&
-    insetBounds.minY >= plotBounds.minY - eps &&
-    insetBounds.maxX <= plotBounds.maxX + eps &&
-    insetBounds.maxY <= plotBounds.maxY + eps
-  if (!contained) return { ok: false, reason: 'envelope_collapsed' }
-  if (signedArea(inset) <= 0) return { ok: false, reason: 'envelope_collapsed' }
+  const ccwPlot = ensureCCW(plotPolygon)
+  const inset = ensureCCW(insetPolygon(plotPolygon, d))
 
-  // Clip against the original plot to guarantee containment and discard
-  // any self-intersection artifacts produced by the analytic offset.
-  const clipped = polygonClipping.intersection(
-    [ensureCCW(inset)],
-    [ensureCCW(plotPolygon)],
-  )
-  if (clipped.length === 0) return { ok: false, reason: 'envelope_collapsed' }
+  // Authoritative containment check: if the inset has any area outside the
+  // plot, the analytic offset overflowed (setbacks too large or self-intersecting
+  // for a rotated/concave plot). A previous bbox-based heuristic was wrong in
+  // both directions for rotated plots — false positives on valid insets and
+  // false negatives on inverted insets whose bbox happens to fit. Don't bring
+  // it back without re-deriving why this check is insufficient.
+  const overflow = polygonClipping.difference([inset], [ccwPlot])
+  if (overflow.length > 0) return { ok: false, reason: 'plot_too_small' }
+
+  // Inset is contained in plot. Clip via intersection to materialise the final
+  // polygon (handles edge cases like a self-touching inset in concave plots).
+  const clipped = polygonClipping.intersection([inset], [ccwPlot])
+  if (clipped.length === 0) return { ok: false, reason: 'plot_too_small' }
 
   // Pick the largest ring (outer boundary of the largest piece).
   let best: Polygon2D | null = null
@@ -158,6 +130,6 @@ export function computeEnvelope(
     }
   }
 
-  if (!best || bestArea <= 0) return { ok: false, reason: 'envelope_collapsed' }
+  if (!best || bestArea <= 0) return { ok: false, reason: 'plot_too_small' }
   return { ok: true, polygon: best, area: bestArea }
 }

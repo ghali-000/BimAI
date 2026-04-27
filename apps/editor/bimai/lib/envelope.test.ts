@@ -39,7 +39,7 @@ describe('computeEnvelope', () => {
     if (result.ok) expect(result.area).toBeCloseTo(484, 1)
   })
 
-  it('reports envelope_collapsed when setbacks exceed plot half-width', () => {
+  it('reports plot_too_small when setbacks exceed plot half-width', () => {
     const plot: [number, number][] = [
       [0, 0],
       [4, 0],
@@ -51,7 +51,51 @@ describe('computeEnvelope', () => {
     })
     const result = computeEnvelope(plot, zoning)
     expect(result.ok).toBe(false)
-    if (!result.ok) expect(result.reason).toBe('envelope_collapsed')
+    if (!result.ok) expect(result.reason).toBe('plot_too_small')
+  })
+
+  // Regression — locks in the difference-based containment check.
+  // A 4×4 plot rotated 30° about its centroid has a bbox ~5.46 wide. With 5 m
+  // setbacks the analytic inset overflows the plot, but the inset's bbox can
+  // still fit inside the plot's bbox — the prior heuristic missed this.
+  describe('rotated 4×4 plot', () => {
+    function rotated(theta: number): [number, number][] {
+      const cx = 2
+      const cy = 2
+      const cos = Math.cos(theta)
+      const sin = Math.sin(theta)
+      const corners: [number, number][] = [
+        [0, 0],
+        [4, 0],
+        [4, 4],
+        [0, 4],
+      ]
+      return corners.map(([x, y]) => {
+        const dx = x - cx
+        const dy = y - cy
+        return [cx + dx * cos - dy * sin, cy + dx * sin + dy * cos]
+      })
+    }
+
+    it('succeeds with 1.5 m uniform setback (≈1×1 inset)', () => {
+      const plot = rotated(Math.PI / 6)
+      const zoning = ZoningRules.parse({
+        setbacks: { front: 1.5, side: 1.5, rear: 1.5 },
+      })
+      const result = computeEnvelope(plot, zoning)
+      expect(result.ok).toBe(true)
+      if (result.ok) expect(result.area).toBeCloseTo(1, 2)
+    })
+
+    it('rejects with 5 m uniform setback as plot_too_small', () => {
+      const plot = rotated(Math.PI / 6)
+      const zoning = ZoningRules.parse({
+        setbacks: { front: 5, side: 5, rear: 5 },
+      })
+      const result = computeEnvelope(plot, zoning)
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.reason).toBe('plot_too_small')
+    })
   })
 
   it('handles CW-oriented input by treating it as the same plot', () => {
