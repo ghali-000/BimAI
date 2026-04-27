@@ -124,6 +124,12 @@ export interface EditorProps {
   viewerToolbarLeft?: ReactNode
   viewerToolbarRight?: ReactNode
 
+  // BIMAI: viewer-scene-slot — Phase 3-2
+  // Optional R3F children rendered inside the Viewer's scene fragment, alongside
+  // built-in systems (Grid, ToolManager, etc). Used by BimAI to overlay buildable
+  // envelope visuals. Does not modify Pascal's data model or stores.
+  viewerSceneSlot?: ReactNode
+
   projectId?: string | null
 
   // Persistence — defaults to localStorage when omitted
@@ -575,11 +581,14 @@ const ViewerSceneContent = memo(function ViewerSceneContent({
   isLoading,
   isFirstPersonMode,
   onThumbnailCapture,
+  viewerSceneSlot,
 }: {
   isVersionPreviewMode: boolean
   isLoading: boolean
   isFirstPersonMode: boolean
   onThumbnailCapture?: (blob: Blob, cameraData: SnapshotCameraData) => void
+  // BIMAI: viewer-scene-slot — Phase 3-2
+  viewerSceneSlot?: ReactNode
 }) {
   return (
     <>
@@ -604,6 +613,8 @@ const ViewerSceneContent = memo(function ViewerSceneContent({
       <PresetThumbnailGenerator />
       {!isFirstPersonMode && <SiteEdgeLabels />}
       {isFirstPersonMode && <InteractiveSystem />}
+      {/* BIMAI: viewer-scene-slot — Phase 3-2 */}
+      {viewerSceneSlot}
     </>
   )
 })
@@ -790,6 +801,7 @@ const ViewerCanvas = memo(function ViewerCanvas({
   showLoader,
   isFirstPersonMode,
   onThumbnailCapture,
+  viewerSceneSlot,
 }: {
   isVersionPreviewMode: boolean
   isLoading: boolean
@@ -797,6 +809,8 @@ const ViewerCanvas = memo(function ViewerCanvas({
   showLoader: boolean
   isFirstPersonMode: boolean
   onThumbnailCapture?: (blob: Blob, cameraData: SnapshotCameraData) => void
+  // BIMAI: viewer-scene-slot — Phase 3-2
+  viewerSceneSlot?: ReactNode
 }) {
   const viewMode = useEditor((s) => s.viewMode)
   const floorplanPaneRatio = useEditor((s) => s.floorplanPaneRatio)
@@ -905,6 +919,7 @@ const ViewerCanvas = memo(function ViewerCanvas({
               isLoading={isLoading}
               isVersionPreviewMode={isVersionPreviewMode}
               onThumbnailCapture={onThumbnailCapture}
+              viewerSceneSlot={viewerSceneSlot}
             />
           </Viewer>
         </div>
@@ -922,6 +937,7 @@ export default function Editor({
   sidebarTabs,
   viewerToolbarLeft,
   viewerToolbarRight,
+  viewerSceneSlot,
   projectId,
   onLoad,
   onSave,
@@ -1052,6 +1068,7 @@ export default function Editor({
       isVersionPreviewMode={isVersionPreviewMode}
       onThumbnailCapture={onThumbnailCapture}
       showLoader={showLoader}
+      viewerSceneSlot={viewerSceneSlot}
     />
   )
 
