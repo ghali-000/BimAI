@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 
-type BimAIPanel = 'project' | 'zoning' | 'program' | null
+type BimAIPanel = 'project' | 'zoning' | 'program' | 'generation' | null
 
 type BimAIState = {
   activePanel: BimAIPanel
