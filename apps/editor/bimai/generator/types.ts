@@ -93,6 +93,29 @@ export type GeneratorFailureReason =
   | 'unit_packing_failed'
   | 'invalid_input'
 
+/**
+ * Top-line "did we satisfy the program?" stats. Computed from the program
+ * mix and the actual unit polygons emitted on a single floor (we assume all
+ * floors are identical today — see the floors-vary caveat in PROGRESS.md).
+ *
+ * placementRate is `unitsPlacedPerFloor / unitsRequested`, in [0, 1]. When
+ * unitsRequested is 0 the rate is 1 by convention (no demand → trivially
+ * satisfied). totalAcrossFloors lets the UI show absolute building-wide
+ * counts without the panel doing arithmetic.
+ */
+export interface PlacementSummary {
+  unitsRequested: number
+  unitsPlacedPerFloor: number
+  placementRate: number
+  totalAcrossFloors: number
+}
+
 export type GeneratorOutput =
-  | { ok: true; plan: BuildingPlan; opsApplied: number; warnings: string[] }
+  | {
+      ok: true
+      plan: BuildingPlan
+      opsApplied: number
+      warnings: string[]
+      placement: PlacementSummary
+    }
   | { ok: false; reason: GeneratorFailureReason; issues: string[] }

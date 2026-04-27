@@ -31,7 +31,11 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { z } from 'zod'
 import { runGenerator } from '../generator/pipeline'
 import { createMemoryWriter } from '../generator/scene-writer'
-import type { GeneratorInput, GeneratorOutput } from '../generator/types'
+import type {
+  GeneratorInput,
+  GeneratorOutput,
+  PlacementSummary,
+} from '../generator/types'
 import { Program, ZoningRules } from '../schemas'
 
 // ── Config schema ────────────────────────────────────────────────────────────
@@ -117,6 +121,7 @@ interface RunArtifact {
   opsApplied?: number
   generationId?: string
   floorCount?: number
+  placement?: PlacementSummary
   /** Flat list of every node the writer ended up holding (excluding the
    *  pre-existing building stub we seeded). */
   nodes?: unknown[]
@@ -165,6 +170,7 @@ function runOne(config: GenerateConfig): RunArtifact {
     generationId: out.plan.generationId,
     floorCount: out.plan.floorCount,
     warnings: out.warnings,
+    placement: out.placement,
     nodes,
   }
 }

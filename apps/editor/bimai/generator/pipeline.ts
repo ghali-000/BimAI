@@ -35,6 +35,7 @@ import type {
   FloorPlan,
   GeneratorInput,
   GeneratorOutput,
+  PlacementSummary,
 } from './types'
 
 export interface BuildPlanResult {
@@ -158,6 +159,26 @@ export function buildPlan(
   return { ok: true, plan }
 }
 
+// Placement summary — top-line stats for the panel. We treat all floors as
+// identical today (every floor re-runs the same pack), so per-floor count
+// is just the first floor's unit count; total is per-floor × floorCount.
+// When the floors loop diverges in Phase 3-4 this needs to switch to a
+// floor-aware reduction.
+function computePlacement(
+  input: GeneratorInput,
+  plan: BuildingPlan,
+): PlacementSummary {
+  const unitsRequested = input.program.unitMix.reduce(
+    (s, u) => s + Math.max(0, u.count),
+    0,
+  )
+  const unitsPlacedPerFloor = plan.floors[0]?.units.length ?? 0
+  const totalAcrossFloors = unitsPlacedPerFloor * plan.floorCount
+  const placementRate =
+    unitsRequested === 0 ? 1 : unitsPlacedPerFloor / unitsRequested
+  return { unitsRequested, unitsPlacedPerFloor, placementRate, totalAcrossFloors }
+}
+
 /**
  * Plan + apply. Wraps the apply phase in `pauseHistory`/`resumeHistory` so
  * one undo step rolls the whole generation back. Always resumes — the apply
@@ -188,6 +209,7 @@ export function runGenerator(
       plan,
       opsApplied: ops.length,
       warnings: plan.warnings,
+      placement: computePlacement(input, plan),
     }
   } finally {
     writer.resumeHistory()

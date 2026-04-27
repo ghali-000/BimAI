@@ -296,4 +296,73 @@ describe('runGenerator (with writer)', () => {
     }
     expect(count).toBe(out.opsApplied)
   })
+
+  it('reports a placement summary matching plan + program', () => {
+    // Realistic input — 4S + 6×1BR + 4×2BR on 50×30 with 5/3/4 setbacks.
+    // Same shape the running app uses; pipeline currently fits 14 per floor
+    // across 2 floors (= 28 zones) before strip-end clamps trim a 1BR.
+    const writer = createMemoryWriter({
+      nodes: {
+        [BUILDING_ID]: {
+          ...(makeNode(BUILDING_ID, 'building', null) as unknown as Record<
+            string,
+            unknown
+          >),
+          children: [],
+        } as unknown as AnyNode,
+      },
+    })
+    const out = runGenerator(
+      {
+        siteId: SITE_ID,
+        buildingId: BUILDING_ID,
+        plotPolygon: [
+          [0, 0],
+          [50, 0],
+          [50, 30],
+          [0, 30],
+        ],
+        zoning: ZONING,
+        program: {
+          unitMix: [
+            { type: 'Studio', count: 4, targetArea: 35 },
+            { type: '1BR', count: 6, targetArea: 55 },
+            { type: '2BR', count: 4, targetArea: 80 },
+          ],
+          floorToFloorHeight: 3,
+        },
+      },
+      writer,
+    )
+    expect(out.ok).toBe(true)
+    if (!out.ok) return
+    const p = out.placement
+    expect(p.unitsRequested).toBe(14)
+    // pipeline plans identical floors today; per-floor count == floor[0].units.
+    expect(p.unitsPlacedPerFloor).toBe(out.plan.floors[0]!.units.length)
+    expect(p.totalAcrossFloors).toBe(p.unitsPlacedPerFloor * out.plan.floorCount)
+    expect(p.placementRate).toBeCloseTo(p.unitsPlacedPerFloor / 14)
+  })
+
+  it('returns placementRate=1 when the program requests zero units', () => {
+    const writer = createMemoryWriter({
+      nodes: {
+        [BUILDING_ID]: {
+          ...(makeNode(BUILDING_ID, 'building', null) as unknown as Record<
+            string,
+            unknown
+          >),
+          children: [],
+        } as unknown as AnyNode,
+      },
+    })
+    const out = runGenerator(
+      baseInput({ program: { unitMix: [], floorToFloorHeight: 3 } }),
+      writer,
+    )
+    expect(out.ok).toBe(true)
+    if (!out.ok) return
+    expect(out.placement.unitsRequested).toBe(0)
+    expect(out.placement.placementRate).toBe(1)
+  })
 })

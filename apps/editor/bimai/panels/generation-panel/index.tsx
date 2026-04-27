@@ -143,6 +143,39 @@ export function GenerationPanel() {
   )
 }
 
+// Pick a colour for the placement-rate percentage. Thresholds match the
+// brief: ≥80 % green, 50–80 % default (no colour), <50 % amber, <25 % red.
+// Order matters — narrow buckets first so the early returns work.
+function placementRateColour(rate: number): string {
+  if (rate < 0.25) return 'text-red-400'
+  if (rate < 0.5) return 'text-amber-300'
+  if (rate >= 0.8) return 'text-emerald-300'
+  return ''
+}
+
+function PlacementHeadline({
+  result,
+}: { result: Extract<GeneratorOutput, { ok: true }> }) {
+  const { unitsPlacedPerFloor, unitsRequested, placementRate, totalAcrossFloors } =
+    result.placement
+  const pct = Math.round(placementRate * 100)
+  const colour = placementRateColour(placementRate)
+  return (
+    <p className="text-foreground text-sm">
+      Placed <span className="font-medium">{unitsPlacedPerFloor}</span> of{' '}
+      <span className="font-medium">{unitsRequested}</span> units per floor (
+      <span className={colour ? `${colour} font-medium` : 'font-medium'}>
+        {pct}%
+      </span>
+      ).{' '}
+      <span className="text-muted-foreground">
+        {totalAcrossFloors} total across {result.plan.floorCount} floor
+        {result.plan.floorCount === 1 ? '' : 's'}.
+      </span>
+    </p>
+  )
+}
+
 function ResultSection({ result }: { result: GeneratorOutput }) {
   if (result.ok) {
     return (
@@ -150,6 +183,7 @@ function ResultSection({ result }: { result: GeneratorOutput }) {
         <h3 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
           Last generation
         </h3>
+        <PlacementHeadline result={result} />
         <div className="flex justify-between text-xs">
           <span className="text-muted-foreground">Status</span>
           <span className="text-emerald-300">ok</span>
