@@ -1,6 +1,10 @@
 'use client'
 
-import { useActiveSite, useFirstBuildingId } from '../../lib/active-nodes'
+import {
+  useActiveSite,
+  useFirstBuildingId,
+  useNodeById,
+} from '../../lib/active-nodes'
 import {
   readBuildingMetadata,
   writeBuildingMetadata,
@@ -15,8 +19,14 @@ const FIELD_CLASS =
 export function ProgramPanel() {
   const site = useActiveSite()
   const buildingId = useFirstBuildingId(site?.id ?? null)
+  // IMPORTANT: subscribe to the building node so the panel re-renders when
+  // metadata is patched. Without this, controlled inputs (`value={row.count}`)
+  // visually freeze on the initial store value — onChange writes succeed, but
+  // the next render reads from a stale closure and overwrites the user's
+  // keystroke. See `useNodeById` for the long story.
+  const buildingNode = useNodeById(buildingId)
 
-  if (!buildingId) {
+  if (!buildingId || !buildingNode) {
     return (
       <div className="px-4 py-3 text-muted-foreground text-sm">
         No building in scene.

@@ -15,7 +15,11 @@
 // click thread.
 
 import { useState } from 'react'
-import { useActiveSite, useFirstBuildingId } from '../../lib/active-nodes'
+import {
+  useActiveSite,
+  useFirstBuildingId,
+  useNodeById,
+} from '../../lib/active-nodes'
 import {
   readBuildingMetadata,
   readSiteMetadata,
@@ -41,6 +45,10 @@ const DEFAULT_PROGRAM: Program = {
 export function GenerationPanel() {
   const site = useActiveSite()
   const buildingId = useFirstBuildingId(site?.id ?? null)
+  // Subscribe so the inputs panel reflects program/zoning edits made in
+  // sibling panels without a refresh. (Same reason as ProgramPanel — see
+  // `useNodeById` doc.)
+  useNodeById(buildingId)
   const [last, setLast] = useState<GeneratorOutput | null>(null)
   const [running, setRunning] = useState(false)
 
