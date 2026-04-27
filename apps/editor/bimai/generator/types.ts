@@ -35,6 +35,20 @@ export interface UnitPlan {
   facadeEdges: number[]
   /** Indices into `polygon` for edges that face the corridor (doors). */
   corridorEdges: number[]
+  /**
+   * Rooms inside this unit. The current stub emits a single "open" room
+   * matching the unit polygon; a later stage may subdivide into bedroom /
+   * bath / kitchen / living. Optional so older fixtures stay valid.
+   */
+  rooms?: RoomPlan[]
+}
+
+export interface RoomPlan {
+  /** e.g. "open", "bedroom", "bath". The stub uses "open". */
+  name: string
+  polygon: [number, number][]
+  /** Computed area in m². */
+  area: number
 }
 
 export interface CorridorPlan {
