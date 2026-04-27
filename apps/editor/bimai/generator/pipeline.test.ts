@@ -116,22 +116,27 @@ describe('buildPlan (pure)', () => {
   })
 
   it('emits a program_exceeds_capacity failure when no units fit', () => {
-    // Tiny plot + huge unit targetArea so packer rejects everything on every floor.
+    // With the clamp path (Phase 3-3), `program_exceeds_capacity` only fires
+    // when the footprint's long axis is shorter than MIN_UNIT_WIDTH_M (3m) —
+    // every queue item then fails rule 4 on both strips.
+    //
+    // Plot 4×4.5, all setbacks 0.5 ⇒ envelope 3×3.5, footprint inset 0.5 ⇒
+    // 2×2.5 (area 5 m², above MIN_FOOTPRINT_AREA_M2=4). longLen = 2.5 < 3.
     const r = buildPlan(
       baseInput({
         plotPolygon: [
           [0, 0],
-          [20, 0],
-          [20, 18],
-          [0, 18],
+          [4, 0],
+          [4, 4.5],
+          [0, 4.5],
         ],
         zoning: {
           ...ZONING,
-          setbacks: { front: 0.1, side: 0.1, rear: 0.1 },
+          setbacks: { front: 0.5, side: 0.5, rear: 0.5 },
         },
         program: {
           ...PROGRAM,
-          unitMix: [{ type: 'mansion', count: 5, targetArea: 50000 }],
+          unitMix: [{ type: 'mansion', count: 5, targetArea: 5000 }],
         },
       }),
     )

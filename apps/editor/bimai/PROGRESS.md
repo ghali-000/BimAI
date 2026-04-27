@@ -1,5 +1,11 @@
 # BimAI Progress
 
+## Phase 3-3 — Procedural Generator (in progress)
+
+### Known limitations to revisit later
+
+- **Greedy left-then-right unit packing** fills strip 0 fully before touching strip 1, producing visually front-heavy floors with one full façade and one half-empty one. The clamp path (min/max/strip-end) keeps it correct but doesn't balance — flag as a Phase 3-5 optimizer concern (BLF / two-row balanced packing).
+
 ## Phase 3-2 — Buildable Envelope (complete)
 
 ### What works (verified in the running app)
