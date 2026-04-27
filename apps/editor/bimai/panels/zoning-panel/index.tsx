@@ -1,11 +1,13 @@
 'use client'
 
 import { useActiveSite } from '../../lib/active-nodes'
+import type { Issue } from '../../lib/constraints/zoning'
 import {
   calculatePerimeter,
   calculatePolygonArea,
 } from '../../lib/geometry'
 import { readSiteMetadata, writeSiteMetadata } from '../../lib/metadata'
+import { useActiveSiteEnvelopeData } from '../../lib/use-active-site-envelope-data'
 import type { ZoningRules } from '../../schemas'
 
 const NUMBER_FIELD_CLASS =
@@ -50,8 +52,20 @@ function NumberField({
   )
 }
 
+function severityClass(severity: Issue['severity']): string {
+  switch (severity) {
+    case 'error':
+      return 'border-red-500/40 bg-red-500/10 text-red-300'
+    case 'warning':
+      return 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+    default:
+      return 'border-border/40 bg-muted/20 text-muted-foreground'
+  }
+}
+
 export function ZoningPanel() {
   const site = useActiveSite()
+  const { envelope, issues } = useActiveSiteEnvelopeData()
 
   if (!site) {
     return (
@@ -168,6 +182,50 @@ export function ZoningPanel() {
           <span>{perimeter.toFixed(1)} m</span>
         </div>
       </section>
+
+      <section className="flex flex-col gap-1.5 border-border/50 border-t pt-3">
+        <h3 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
+          Buildable envelope
+        </h3>
+        {envelope?.ok ? (
+          <>
+            <div className="flex justify-between text-xs">
+              <span className="text-muted-foreground">Envelope area</span>
+              <span>{envelope.area.toFixed(1)} m²</span>
+            </div>
+            <div className="flex justify-between text-xs">
+              <span className="text-muted-foreground">Coverage</span>
+              <span>
+                {area > 0
+                  ? `${((envelope.area / area) * 100).toFixed(1)}%`
+                  : '—'}
+              </span>
+            </div>
+          </>
+        ) : (
+          <div className="text-muted-foreground text-xs">
+            No envelope — setbacks consume the plot.
+          </div>
+        )}
+      </section>
+
+      {issues.length > 0 && (
+        <section className="flex flex-col gap-1.5 border-border/50 border-t pt-3">
+          <h3 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
+            Issues
+          </h3>
+          <ul className="flex flex-col gap-1.5">
+            {issues.map((issue) => (
+              <li
+                className={`rounded-md border px-2 py-1.5 text-xs ${severityClass(issue.severity)}`}
+                key={issue.code}
+              >
+                {issue.message}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
     </div>
   )
 }
