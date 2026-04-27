@@ -6,6 +6,9 @@ import {
   ViewerToolbarLeft,
   ViewerToolbarRight,
 } from '@pascal-app/editor'
+import { ProgramPanel } from '../bimai/panels/program-panel'
+import { ProjectPanel } from '../bimai/panels/project-panel'
+import { ZoningPanel } from '../bimai/panels/zoning-panel'
 
 const SIDEBAR_TABS: (SidebarTab & { component: React.ComponentType })[] = [
   {
@@ -13,6 +16,9 @@ const SIDEBAR_TABS: (SidebarTab & { component: React.ComponentType })[] = [
     label: 'Scene',
     component: () => null, // Built-in SitePanel handles this
   },
+  { id: 'project', label: 'Project', component: ProjectPanel },
+  { id: 'zoning', label: 'Zoning', component: ZoningPanel },
+  { id: 'program', label: 'Program', component: ProgramPanel },
 ]
 
 export default function Home() {

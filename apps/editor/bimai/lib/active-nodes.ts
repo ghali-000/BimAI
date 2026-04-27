@@ -15,12 +15,25 @@ export function useActiveSite(): SiteNode | null {
   )
 }
 
-// Hook: the first BuildingNode whose parent is the given site.
+// Hook: the first BuildingNode under the given site.
+//
+// Pascal's default scene leaves BuildingNode.parentId === null even though
+// the site embeds the building in site.children (schema asymmetry). Prefer
+// the site.children array — it's the canonical hierarchy per the schema —
+// and fall back to a type scan if no embedded children are present.
 export function useFirstBuildingId(siteId: AnyNodeId | null): AnyNodeId | null {
   return useScene((state) => {
     if (!siteId) return null
+    const site = state.nodes[siteId] as SiteNode | undefined
+    if (site?.children) {
+      for (const child of site.children) {
+        if (typeof child === 'object' && child !== null && child.type === 'building') {
+          return child.id
+        }
+      }
+    }
     for (const node of Object.values(state.nodes)) {
-      if (node.type === 'building' && node.parentId === siteId) return node.id
+      if (node.type === 'building') return node.id
     }
     return null
   })
