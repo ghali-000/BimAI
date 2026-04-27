@@ -13,11 +13,48 @@
 import {
   type AnyNode,
   type AnyNodeId,
+  DoorNode,
+  LevelNode,
+  SlabNode,
   useScene,
+  WallNode,
+  WindowNode,
+  ZoneNode,
 } from '@pascal-app/core'
 import type { SceneSnapshot } from './cleanup'
 import type { SceneWriter } from './scene-writer'
 import type { NodeOp } from './types'
+
+// Boundary-validation: our emitter constructs nodes with `{...} as unknown as
+// Foo` casts that bypass Zod defaults. Pascal's render systems then read those
+// defaulted fields directly (e.g. door-system computes `width - 2 *
+// frameThickness`); when frameThickness is undefined the result is NaN, which
+// poisons mesh bounding boxes and breaks drei's CameraControls. We re-parse
+// each emitted node here so every defaulted field is materialised before the
+// store sees it. Tests use MemoryWriter and skip this path because importing
+// `@pascal-app/core` schemas in vitest crashes via three-mesh-bvh's eager
+// barrel evaluation — see `bimai/generator/emit.guardrail.md`.
+//
+// Our `metadata.bimai` blob survives parsing because BaseNode declares
+// `metadata: z.json()` (accepts arbitrary JSON). Top-level fields outside
+// each schema would be stripped — keep emit.ts honest about what it sets.
+const SCHEMAS: Record<
+  string,
+  { parse: (v: unknown) => unknown } | undefined
+> = {
+  door: DoorNode,
+  window: WindowNode,
+  wall: WallNode,
+  slab: SlabNode,
+  zone: ZoneNode,
+  level: LevelNode,
+}
+
+function applyDefaults(op: NodeOp): NodeOp {
+  const schema = SCHEMAS[op.node.type]
+  if (!schema) return op
+  return { ...op, node: schema.parse(op.node) as AnyNode }
+}
 
 /**
  * Returns a SceneWriter that proxies to Pascal's `useScene` store. Lazily
@@ -30,7 +67,7 @@ export function createPascalSceneWriter(): SceneWriter {
       return { nodes: useScene.getState().nodes as Record<AnyNodeId, AnyNode> }
     },
     createNodes(ops: NodeOp[]): void {
-      useScene.getState().createNodes(ops)
+      useScene.getState().createNodes(ops.map(applyDefaults))
     },
     deleteNodes(ids: AnyNodeId[]): void {
       useScene.getState().deleteNodes(ids)
