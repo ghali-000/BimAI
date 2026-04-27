@@ -1,0 +1,23 @@
+{
+  "plotPolygon": [
+    [0, 0],
+    [50, 0],
+    [50, 30],
+    [0, 30]
+  ],
+  "zoning": {
+    "setbacks": { "front": 5, "side": 3, "rear": 4 },
+    "maxHeight": 24,
+    "maxFAR": 2,
+    "maxCoverage": 0.6,
+    "minOpenSpace": 0.3
+  },
+  "program": {
+    "unitMix": [
+      { "type": "Studio", "count": 4, "targetArea": 35 },
+      { "type": "1BR", "count": 6, "targetArea": 55 },
+      { "type": "2BR", "count": 4, "targetArea": 80 }
+    ],
+    "floorToFloorHeight": 3
+  }
+}

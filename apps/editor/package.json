@@ -10,7 +10,8 @@
     "lint": "biome lint",
     "check-types": "next typegen && tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "generate": "bun run bimai/cli/generate.ts"
   },
   "dependencies": {
     "@number-flow/react": "^0.5.14",
