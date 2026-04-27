@@ -63,7 +63,12 @@ function lineIntersect(
 
 // Compute inward-offset polygon by shifting each edge inward by `distance`,
 // then intersecting adjacent shifted edges to recover vertices.
-function insetPolygon(poly: Polygon2D, distance: number): Polygon2D {
+//
+// Exported so the procedural generator's footprint stage can apply a structural
+// margin without re-implementing the offset math. Callers must independently
+// validate that the result is contained in the source polygon — for rotated or
+// concave inputs the analytic offset can overflow.
+export function insetPolygon(poly: Polygon2D, distance: number): Polygon2D {
   const ccw = ensureCCW(poly)
   const n = ccw.length
   const shifted: Array<[Point2D, Point2D]> = []
