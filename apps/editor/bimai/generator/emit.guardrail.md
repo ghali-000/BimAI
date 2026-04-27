@@ -1,6 +1,13 @@
-# Emit drift guardrail (deferred)
+# Emit drift guardrail
 
-## What's missing
+## Status
+
+**Live as of 2026-04-28** — see `emit.guardrail.test.ts`. The notes below
+capture the historical context (why this took an upstream PR to unblock)
+and stay relevant until the local pick of that PR can be reverted in
+favour of the upstream version.
+
+## What was missing
 
 A vitest spec that runs the full pipeline against a realistic input and
 validates every emitted node with the corresponding Pascal Zod schema:
