@@ -1,10 +1,59 @@
 # BimAI Progress
 
-## Phase 3-3 — Procedural Generator (in progress)
+## Phase 3-3 — Procedural Generator (complete)
 
-### Known limitations to revisit later
+### What works (verified in the running app + CLI)
 
-- **Greedy left-then-right unit packing** fills strip 0 fully before touching strip 1, producing visually front-heavy floors with one full façade and one half-empty one. The clamp path (min/max/strip-end) keeps it correct but doesn't balance — flag as a Phase 3-5 optimizer concern (BLF / two-row balanced packing).
+- **Generate button** in the right-sidebar Generation panel takes the active site polygon + zoning + program, runs the pipeline against Pascal's store, and replaces every previously-generated node under the building with a fresh set in one undoable step. Cmd-Z rolls the entire generation back to the pre-click scene; Cmd-Shift-Z replays it.
+- Default 30×30 scene with the seeded program (4 Studio + 6 1BR + 4 2BR, FtF 3, setbacks 5/3/4) generates 2 floors, 14 units per floor (Σ 28 zones + 28 doors + 28 windows), 38 walls (perimeter + corridor + party), 2 slabs, 2 levels — 132 nodes total. Visible in 3D: doors render with frame/leaf/handle, windows with sill + dividers, walls miter, slabs cap each floor.
+- **Pipeline stages**, all pure: envelope (Phase 3-2) → footprint (structural inset) → floors (FAR + height clamps) → corridor (centreline + width) → unit pack (greedy strip-fill with width clamp band [3, 9] m) → rooms (single open room per unit, stub) → emit (plan → NodeOps).
+- **Clamp path** in the unit packer surfaces three warning codes (`unit_clipped_min`, `unit_clipped_max`, `unit_clipped_strip_end`) and a per-type cumulative-drift summary when total area diverges >5% from target. `program_exceeds_capacity` only fires now when the footprint's long axis is shorter than `MIN_UNIT_WIDTH_M` so every queue item fails on both strips.
+- **Generation tag**: every emitted node carries `metadata.bimai.generatedBy = 'bimai-generator'` and `generationId = nanoid()`. Cleanup walks the building subtree and only deletes nodes carrying the tag — user-drawn walls / doors / etc. survive a regenerate.
+- **Boundary fix** at the SceneWriter: every emitted node is re-parsed through its Pascal Zod schema (DoorNode, WindowNode, WallNode, SlabNode, ZoneNode, LevelNode) inside `pascal-writer.ts` so defaulted fields (`frameThickness`, `frameDepth`, `segments`, `sill*`, …) are materialised before the store sees them. Without this, `door-system.tsx`'s `width − 2 * frameThickness` produced NaN, poisoned mesh bounding boxes, and froze drei's CameraControls after the first Generate.
+- **Single-undo regeneration**: `runGenerator` wraps delete + create in `useScene.temporal.pause() / resume()` so Zundo collapses the regeneration into one history step. Verified by clicking Generate twice with edits in between — Cmd-Z restores the previous generation, Cmd-Z again restores the pre-Generate state.
+- **Headless CLI**: `bun run generate -- --input config.json --output building.json` (also `--batch in.jsonl --batch-out out.jsonl`, also stdin/stdout). Same pipeline, MemoryWriter instead of zustand. Exit codes 0/1/2 (success / IO+validation / typed pipeline failure). Reuses the panels' `ZoningRules` and `Program` schemas for input validation. Demo fixture in `bimai/cli/fixtures/demo-50x30.json`; piping it through the CLI produces 126 nodes (the missing 6 are the strip-end-clipped 1BR per floor — same warning the panel reports).
+- **128 vitest specs** across `geometry`, `envelope`, `constraints/zoning`, `tag`, `cleanup`, `emit`, `pipeline`, and the four packer stages (corridor, footprint, floors, units). `bun run test` is green; `bun run test:watch` works for iteration.
+- Zero console errors. Default scene survives full-page reloads (metadata rides on Pascal's existing `localStorage` persistence).
+
+### Pinned regression cases (Gate 1)
+
+The four hand-traced packer cases the strip-fill logic was designed against, encoded in `bimai/generator/stages/units.test.ts`:
+
+1. **4 Studios on a 30×10 outline** — all four fit on strip 0 with leftover room.
+2. **Oversize 4BR** — clamps to `MAX_UNIT_WIDTH_M = 9` m and emits `unit_clipped_max`.
+3. **20 Studios on 50×12** — 8 placed (4 per strip via strip-end-clip), 12 unplaced; surfaces `unit_clipped_strip_end` and the `program_exceeds_capacity` outcome only escalates when geometry forbids both strips.
+4. **Mixed 4 S + 6×1BR + 4×2BR on 50×12** — 13 placed, 1 × 2BR unplaced (rule 3 strip-end clamp bites on the second strip).
+
+Comments in the test file walk through the arithmetic so future packer edits can be reasoned about against the pinned outcomes.
+
+### What's stubbed / known limitations
+
+- **Greedy left-then-right unit packing** fills strip 0 fully before touching strip 1, so floors look front-heavy (one façade fully populated, the opposite façade tail-trimmed). The clamp path keeps the geometry valid but doesn't balance. Flagged for Phase 3-5 optimiser (BLF / two-row balanced packing).
+- **Single-room "open" stub per unit**. `attachRoomsToUnits` emits one room matching the unit polygon. Subdivision into bedroom / bath / kitchen / living is the obvious next stage but isn't needed for the buildable-mass milestone.
+- **Corridor is a single straight centreline** down the long axis. Works for rectangular footprints; the corridor stage `asRectangle` check rejects anything else with `corridor_layout_failed`. L-shaped / T-shaped corridors are a Phase 3-4 concern.
+- **Identical floors** — every level re-runs the same corridor + pack with the same outline. Stepped setbacks, ground-floor commercial, penthouse units would all need the floor loop to vary by `i`.
+- **No user-supplied seed yet**. `GeneratorInput.seed` exists but the pipeline ignores it (every call mints a fresh `nanoid()` for `generationId`). When the packer or footprint stage gains stochastic choices, this is the wire to plumb.
+- **Drift guardrail test deferred**. A vitest spec that runs every emitted node through `safeParse` with the Pascal schema would catch future drift between `emit.ts` and core's schemas, but importing any symbol from `@pascal-app/core` still crashes vitest via three-mesh-bvh's eager barrel evaluation. The boundary parse in `pascal-writer.ts` is the live signal until subpath exports land in core. Documented in `bimai/generator/emit.guardrail.md`.
+
+### Deviations from the brief
+
+- Added `nanoid@^5.1.6` as a direct dep on `apps/editor` (already transitive via `@pascal-app/core`). Used for `generationId` minting per the transitive-promotion pattern from 3-1.
+- The CLI path ships under `bimai/cli/` rather than alongside the generator code. Keeps the IO layer separate from the pure pipeline so the test surface stays tight.
+- Boundary parse went into `pascal-writer.ts`, not `emit.ts`. The brief implied applying defaults at the emit site, but `emit.ts` is `import type`-only against `@pascal-app/core` — pulling schemas in would re-trigger the vitest crash. The writer is browser-only and already runtime-imports core.
+
+### Things that surprised me
+
+- **The `as unknown as Foo` cast pattern in the emitter silently dropped every Zod-defaulted field** — door `frameThickness`, `frameDepth`, `segments`, window `sill*` and `*Ratios`, etc. Pascal's render systems compute downstream values without nullish guards (`width − 2 * frameThickness`), and a single NaN in `BoxGeometry(...)` propagates into the bounding-box Box3, which then breaks drei's `CameraControls.update()` math. The 3D camera "freeze" was actually drei refusing to update its target sphere because the sphere had become NaN. 2D viewport survived because it doesn't use the same focus math.
+- **Pascal's own tools always parse through Zod** (`DoorNode.parse({...})` in `door-tool.tsx:242`, `WallSchema.parse({...})` in `wall-drafting.ts:96, 102, 452`). The pattern was right there — our emitter just bypassed it for raw object construction speed and discoverability. The boundary parse retroactively brings us in line.
+- **`@pascal-app/core` has no subpath exports**, so importing even a leaf Zod schema (`DoorNode`) under vitest pulls the whole barrel and crashes on `three-mesh-bvh/src/core/ObjectBVH.js` extending an undefined class. The `MemoryWriter` / `PascalSceneWriter` seam already worked around this for `useScene`; the same wall blocks the schema-validation guardrail test until either subpath exports land or we vendor a schema-only re-export.
+- **Strip-end clamp is sneakier than I expected** in the mixed program case: with 50 m strips and a 5.294 m remaining tail, the 14-th unit gets clipped — not unplaced — and the visual result is one undersize 2BR rather than a missing one. The pinned test comment "rule 3 (strip-end clamp) bites here" captures this so future readers don't try to "fix" it back to an unplaced count.
+- **Zustand subscription gotcha** caught the Program panel: `useFirstBuildingId` returns just an id, so a panel that reads metadata via `getState()` after the id is fixed never re-renders when the metadata mutates. Fixed by adding a `useNodeById` hook every read+write panel must subscribe through. Generation panel got the same call to keep the inputs row in sync with sibling panel edits.
+
+### What I'd like a look at before Phase 3-4
+
+1. **Subpath export from `@pascal-app/core`** for `./schema`. One line in `packages/core/package.json` unblocks the drift-guardrail test and removes the only "this can't be a vitest test" caveat in this phase. Two-line PR upstream.
+2. **Whether the per-floor pack should be cached** rather than re-planned. We re-run corridor + pack for every floor even though they're identical today. Trivially fixable, but I left it as-is because Phase 3-4 will likely introduce floor-specific variation (stepped setbacks, ground-floor commercial), and a pre-emptive memo would just get unwound.
+3. **Whether `program_exceeds_capacity` is escalating at the right threshold**. Today it only fires when the entire queue ends up unplaced. With the clamp path that's geometrically rare (longLen < 3 m). A softer "placed < 50% of requested" failure mode might surface real over-asking inputs the user should know about, but I didn't want to invent a threshold without product input.
 
 ## Phase 3-2 — Buildable Envelope (complete)
 
