@@ -6,6 +6,7 @@ import {
   ViewerToolbarLeft,
   ViewerToolbarRight,
 } from '@pascal-app/editor'
+import { useSeedDefaultMetadata } from '../bimai/lib/seed'
 import { ProgramPanel } from '../bimai/panels/program-panel'
 import { ProjectPanel } from '../bimai/panels/project-panel'
 import { ZoningPanel } from '../bimai/panels/zoning-panel'
@@ -22,6 +23,7 @@ const SIDEBAR_TABS: (SidebarTab & { component: React.ComponentType })[] = [
 ]
 
 export default function Home() {
+  useSeedDefaultMetadata()
   return (
     <div className="h-screen w-screen">
       <Editor
