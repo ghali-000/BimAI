@@ -7,6 +7,7 @@ import {
   ViewerToolbarRight,
 } from '@pascal-app/editor'
 import { useSeedDefaultMetadata } from '../bimai/lib/seed'
+import { BIMPropertiesPanel } from '../bimai/panels/bim-properties-panel'
 import { CostPanel } from '../bimai/panels/cost-panel'
 import { GenerationPanel } from '../bimai/panels/generation-panel'
 import { ProgramPanel } from '../bimai/panels/program-panel'
@@ -27,6 +28,7 @@ const SIDEBAR_TABS: (SidebarTab & { component: React.ComponentType })[] = [
   { id: 'generation', label: 'Generate', component: GenerationPanel },
   { id: 'schedule', label: 'Schedule', component: SchedulePanel },
   { id: 'cost', label: 'Cost', component: CostPanel },
+  { id: 'bim', label: 'BIM', component: BIMPropertiesPanel },
 ]
 
 export default function Home() {
