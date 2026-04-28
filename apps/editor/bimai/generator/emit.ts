@@ -27,6 +27,7 @@ import type {
   ZoneNode,
 } from '@pascal-app/core'
 import type { Polygon2D, Point2D } from '../lib/envelope'
+import { unitColor } from '../lib/unit-colors'
 import { generateId } from './ids'
 import { asRectangle } from './stages/corridor'
 import { tagAsGenerated } from './tag'
@@ -175,15 +176,6 @@ function emitUnitZone(
   } as unknown as ZoneNode
   // tagAsGenerated deep-merges, so unitType / targetArea survive.
   return { node: tagAsGenerated(node, ctx.generationId), parentId: levelId }
-}
-
-function unitColor(type: string): string {
-  // Stable hash → hue. Produces visually distinct colours for the common
-  // unitMix entries without committing to a fixed palette.
-  let h = 0
-  for (let i = 0; i < type.length; i++) h = (h * 31 + type.charCodeAt(i)) | 0
-  const hue = ((h % 360) + 360) % 360
-  return `hsl(${hue}, 60%, 70%)`
 }
 
 // ── Walls ────────────────────────────────────────────────────────────────────
