@@ -10,6 +10,7 @@ import { useSeedDefaultMetadata } from '../bimai/lib/seed'
 import { GenerationPanel } from '../bimai/panels/generation-panel'
 import { ProgramPanel } from '../bimai/panels/program-panel'
 import { ProjectPanel } from '../bimai/panels/project-panel'
+import { SchedulePanel } from '../bimai/panels/schedule-panel'
 import { ZoningPanel } from '../bimai/panels/zoning-panel'
 import { EnvelopeRenderer } from '../bimai/viewer/buildable-envelope/envelope-renderer'
 
@@ -23,6 +24,7 @@ const SIDEBAR_TABS: (SidebarTab & { component: React.ComponentType })[] = [
   { id: 'zoning', label: 'Zoning', component: ZoningPanel },
   { id: 'program', label: 'Program', component: ProgramPanel },
   { id: 'generation', label: 'Generate', component: GenerationPanel },
+  { id: 'schedule', label: 'Schedule', component: SchedulePanel },
 ]
 
 export default function Home() {
