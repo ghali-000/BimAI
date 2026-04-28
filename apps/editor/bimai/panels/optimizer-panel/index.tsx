@@ -41,6 +41,7 @@ import {
 } from '../../optimizer/worker/client'
 import type { Program, ZoningRules } from '../../schemas'
 import { OptimizerGallery } from './gallery'
+import { OptimizerLoadBridge } from './load-bridge'
 
 const DEFAULT_ZONING: ZoningRules = {
   setbacks: { front: 5, side: 3, rear: 4 },
@@ -235,6 +236,7 @@ export function OptimizerPanel() {
       />
 
       <OptimizerGallery />
+      <OptimizerLoadBridge buildingId={buildingId} />
     </div>
   )
 }

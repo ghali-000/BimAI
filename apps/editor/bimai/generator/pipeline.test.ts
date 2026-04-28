@@ -1,7 +1,7 @@
 import type { AnyNode, AnyNodeId } from '@pascal-app/core'
 import { describe, expect, it } from 'vitest'
 import type { Program, ZoningRules } from '../schemas'
-import { buildPlan, runGenerator } from './pipeline'
+import { applyPlanToScene, buildPlan, runGenerator } from './pipeline'
 import { createMemoryWriter } from './scene-writer'
 import { GENERATED_BY, isGenerated, tagAsGenerated } from './tag'
 import type { GeneratorInput } from './types'
@@ -422,5 +422,81 @@ describe('runGenerator (with writer)', () => {
     expect(def.ok && alt.ok).toBe(true)
     if (!def.ok || !alt.ok) return
     expect(alt.plan.floors[0]!.units.length).toBeGreaterThan(0)
+  })
+})
+
+// Phase 3-5 Task 11 — apply-only seam used by the optimizer's "Load
+// into scene" button. We re-apply a plan produced by buildPlan
+// (mimicking the worker's cached plan) and assert the same
+// invariants runGenerator preserves: pause/resume balance, stale-
+// generation cleanup, generated tagging, no touching of unrelated
+// nodes.
+
+describe('applyPlanToScene (apply-only)', () => {
+  function buildingScene() {
+    return createMemoryWriter({
+      nodes: {
+        [BUILDING_ID]: {
+          ...(makeNode(BUILDING_ID, 'building', null) as unknown as Record<
+            string,
+            unknown
+          >),
+          children: [],
+        } as unknown as AnyNode,
+      },
+    })
+  }
+
+  it('applies a pre-baked plan and tags every emitted node', () => {
+    const planResult = buildPlan(baseInput())
+    if (!('plan' in planResult)) throw new Error('plan failed')
+    const writer = buildingScene()
+    const { opsApplied } = applyPlanToScene(planResult.plan, BUILDING_ID, writer)
+    expect(opsApplied).toBeGreaterThan(0)
+    let tagged = 0
+    for (const n of Object.values(writer.getSnapshot().nodes)) {
+      if (isGenerated(n, planResult.plan.generationId)) tagged++
+    }
+    expect(tagged).toBe(opsApplied)
+    expect(writer.stats.pauseCalls).toBe(1)
+    expect(writer.stats.resumeCalls).toBe(1)
+  })
+
+  it('sweeps stale generated nodes under the same building before re-emit', () => {
+    const oldWall = tagAsGenerated(
+      makeNode('wall_old1', 'wall', BUILDING_ID),
+      'gen-OLD',
+    )
+    const userWall = makeNode('wall_user1', 'wall', BUILDING_ID)
+    const writer = createMemoryWriter({
+      nodes: {
+        [BUILDING_ID]: {
+          ...(makeNode(BUILDING_ID, 'building', null) as unknown as Record<string, unknown>),
+          children: ['wall_old1', 'wall_user1'],
+        } as unknown as AnyNode,
+        wall_old1: oldWall as unknown as AnyNode,
+        wall_user1: userWall,
+      },
+    })
+    const planResult = buildPlan(baseInput())
+    if (!('plan' in planResult)) throw new Error('plan failed')
+    applyPlanToScene(planResult.plan, BUILDING_ID, writer)
+    const after = writer.getSnapshot().nodes
+    expect(after.wall_old1 as unknown).toBeUndefined()
+    expect(after.wall_user1 as unknown).toBeDefined()
+  })
+
+  it('resumes history even when the apply phase throws', () => {
+    const writer = buildingScene()
+    writer.createNodes = () => {
+      throw new Error('boom')
+    }
+    const planResult = buildPlan(baseInput())
+    if (!('plan' in planResult)) throw new Error('plan failed')
+    expect(() => applyPlanToScene(planResult.plan, BUILDING_ID, writer)).toThrow(
+      'boom',
+    )
+    expect(writer.stats.pauseCalls).toBe(1)
+    expect(writer.stats.resumeCalls).toBe(1)
   })
 })

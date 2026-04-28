@@ -19,6 +19,7 @@
 //     paused window so an undo restores the pre-generation state in one step.
 //   - We never throw — every failure is a typed `{ ok: false, reason, issues }`.
 
+import type { AnyNodeId } from '@pascal-app/core'
 import { nanoid } from 'nanoid'
 import { computeEnvelope } from '../lib/envelope'
 import { calculatePolygonArea } from '../lib/geometry'
@@ -211,14 +212,39 @@ export function runGenerator(
   if (planResult.ok !== true) return planResult
   const { plan } = planResult
 
+  const { opsApplied } = applyPlanToScene(plan, input.buildingId, writer)
+  return {
+    ok: true,
+    plan,
+    opsApplied,
+    warnings: plan.warnings,
+    placement: computePlacement(input, plan),
+  }
+}
+
+/**
+ * Apply phase only. Given a pre-baked plan and a target building, sweep
+ * stale generated nodes, emit + BIM-default + apply the new ops, all
+ * inside one paused-history window so a single Cmd-Z reverses it.
+ *
+ * Used by:
+ *   - `runGenerator` (Phase 3-3): planning + apply in one call.
+ *   - Optimizer "Load into scene" (Phase 3-5 Task 11): no planning —
+ *     the worker already produced the plan. We just want the apply.
+ */
+export function applyPlanToScene(
+  plan: BuildingPlan,
+  buildingId: AnyNodeId,
+  writer: SceneWriter,
+): { opsApplied: number } {
   writer.pauseHistory()
   try {
     const snapshot = writer.getSnapshot()
-    const oldIds = findGeneratedNodes(snapshot, input.buildingId)
+    const oldIds = findGeneratedNodes(snapshot, buildingId)
     if (oldIds.length > 0) writer.deleteNodes(oldIds)
 
     const rawOps = emitBuildingPlan(plan, {
-      buildingId: input.buildingId,
+      buildingId,
       generationId: plan.generationId,
     })
     // Stamp `metadata.bimai.bim` (material / fireRating / loadBearing) on
@@ -226,14 +252,7 @@ export function runGenerator(
     // post-emit pass; doesn't touch geometry or hierarchy.
     const ops = applyBIMDefaults(rawOps)
     writer.createNodes(ops)
-
-    return {
-      ok: true,
-      plan,
-      opsApplied: ops.length,
-      warnings: plan.warnings,
-      placement: computePlacement(input, plan),
-    }
+    return { opsApplied: ops.length }
   } finally {
     writer.resumeHistory()
   }
