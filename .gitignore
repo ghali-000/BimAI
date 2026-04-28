@@ -33,6 +33,9 @@ build
 dist
 *.tsbuildinfo
 
+# web-ifc wasm copied at install time (apps/editor/scripts/copy-ifc-wasm.mjs)
+apps/editor/public/wasm/
+
 
 # Debug
 npm-debug.log*

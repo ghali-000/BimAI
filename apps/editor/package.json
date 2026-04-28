@@ -11,7 +11,8 @@
     "check-types": "next typegen && tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "generate": "bun run bimai/cli/generate.ts"
+    "generate": "bun run bimai/cli/generate.ts",
+    "postinstall": "node scripts/copy-ifc-wasm.mjs"
   },
   "dependencies": {
     "@number-flow/react": "^0.5.14",

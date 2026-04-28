@@ -15,6 +15,20 @@
 // `web-ifc`'s package `main` field under bun/node). The browser bundle uses
 // `web-ifc/web-ifc-api.js` (the package's `module` field) — Next.js picks
 // the right entry automatically via the `exports` map.
+//
+// Wasm location: in node, `web-ifc-api-node.js` reads `web-ifc-node.wasm`
+// off the filesystem (relative to its own location) and "just works" for
+// vitest. In the browser, the bundled `web-ifc-api.js` defaults to
+// fetching `web-ifc.wasm` next to the executing JS chunk — which 404s
+// under Turbopack because the bundler doesn't auto-publish wasm
+// siblings of node_modules. We sidestep that by:
+//   1. Copying `web-ifc.wasm` into `public/wasm/` at install time
+//      (`apps/editor/scripts/copy-ifc-wasm.mjs`, run via `postinstall`).
+//   2. Calling `api.SetWasmPath('/wasm/')` before `Init()` in browser
+//      contexts so the runtime fetches `/wasm/web-ifc.wasm` — a stable
+//      URL the Next.js static-asset server hosts directly.
+// The detection is a `typeof window` check; in node the default
+// filesystem path is correct and `SetWasmPath` would actively break it.
 
 import { IfcAPI } from 'web-ifc'
 
@@ -23,13 +37,19 @@ let cached: Promise<IfcAPI> | null = null
 /**
  * Lazy singleton. Calls `IfcAPI.Init()` exactly once per page-load and
  * resolves to the initialized instance every time. Subsequent calls reuse the
- * same wasm module — the wasm binary is ~5 MB and the init is ~30 ms, so we
+ * same wasm module — the wasm binary is ~3 MB and the init is ~30 ms, so we
  * really don't want to redo it per export.
  */
 export async function initIfcApi(): Promise<IfcAPI> {
   if (cached) return cached
   cached = (async () => {
     const api = new IfcAPI()
+    if (typeof window !== 'undefined') {
+      // `/wasm/` is served by Next.js out of `apps/editor/public/wasm/`.
+      // The trailing slash is required — `SetWasmPath` concatenates the
+      // wasm filename onto the path verbatim.
+      api.SetWasmPath('/wasm/')
+    }
     await api.Init()
     return api
   })()
