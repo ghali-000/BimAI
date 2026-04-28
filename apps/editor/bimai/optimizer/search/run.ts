@@ -136,6 +136,14 @@ export interface RunSearchInput {
   sampler?: Sampler
   /** Number of candidates to re-evaluate with full data. Defaults to 6. */
   topK?: number
+  /** Optional progress callback. Fires every `progressEveryN` samples
+   *  during the lightweight scoring loop, plus once at the end (right
+   *  before the sort). Worker integration uses this to forward
+   *  postMessage progress events; Node CLI usage can leave it out. */
+  onProgress?: (sampled: number, total: number, compliantSoFar: number) => void
+  /** How often to fire onProgress. Defaults to ~20 events over the run
+   *  (count/20, floored at 1). */
+  progressEveryN?: number
 }
 
 const DEFAULT_TOP_K = 6
@@ -152,6 +160,8 @@ export function runSearch(args: RunSearchInput): OptimizationResult {
     weights = DEFAULT_WEIGHTS,
     sampler = uniformRandomSampler,
     topK = DEFAULT_TOP_K,
+    onProgress,
+    progressEveryN = Math.max(1, Math.floor(count / 20)),
   } = args
 
   const t0 = nowMs()
@@ -181,6 +191,11 @@ export function runSearch(args: RunSearchInput): OptimizationResult {
       failureCounts[reason] = (failureCounts[reason] ?? 0) + 1
     } else {
       compliantCount++
+    }
+    // Fire progress at the configured cadence and on the final sample.
+    // Indexing on `i+1` so the very first emit reports a non-zero count.
+    if (onProgress && ((i + 1) % progressEveryN === 0 || i === count - 1)) {
+      onProgress(i + 1, count, compliantCount)
     }
   }
 
