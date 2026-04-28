@@ -119,6 +119,101 @@ export const DEFAULT_SPACE: ParamSpace = {
 }
 
 /**
+ * Plot-adaptive search space.
+ *
+ * Phase 3-5's integration check on a 30×30 default scene landed only
+ * 2 / 20 candidates compliant — 18 failed `no_valid_footprint`. Root
+ * cause: `DEFAULT_SPACE` samples `footprintInsetM` and
+ * `footprintOrientation` from bounds tuned for "any plausible plot",
+ * which on small or square plots collapses the rotated-rectangle clip
+ * step inside the footprint stage almost every roll.
+ *
+ * `buildParamSpace({ plotWidth, plotDepth })` shrinks those two
+ * domains as a function of the plot's bounding box:
+ *
+ *   - **Inset** stays in the published [0.3, 1.5] band but never
+ *     exceeds 40 % of the plot's smallest side. On a 30×30 plot the
+ *     cap is 12 m, so DEFAULT_SPACE wins; on a 4×6 plot the inset
+ *     domain shrinks to [0.3, 1.6 → 1.5]. This keeps the inset
+ *     non-trivial without ever inverting the footprint.
+ *
+ *   - **Orientation** narrows on near-square plots. When the plot's
+ *     aspect ratio is > 1.5 (clearly elongated) we allow ±π/24 (7.5°);
+ *     when squarer than 1.5:1 we clamp to ±π/36 (5°). Both bands are
+ *     much tighter than they intuitively "should" be: the footprint
+ *     stage rotates the *inset* polygon and rejects anything that
+ *     overflows the *post-setback* envelope, and on a default
+ *     30×30 plot with 5/3/4 setbacks the buildable rectangle is only
+ *     24×21 — which means even π/12 of rotation overflows on a 21×18
+ *     inset. ±π/36 was tuned on the Phase 3-6 DOD case (default 30×30
+ *     + default program ⇒ ≥16/20 compliant).
+ *
+ * Every other domain is unchanged — only the two footprint knobs are
+ * plot-sensitive.
+ *
+ * Definition of done (per Phase 3-6 brief): default 30×30 + default
+ * program lands ≥80 % compliant samples (target 16+/20).
+ */
+export interface PlotShape {
+  /** Bounding-box width — major axis is irrelevant, just the spans. */
+  plotWidth: number
+  /** Bounding-box depth. */
+  plotDepth: number
+}
+
+export function buildParamSpace(plot: PlotShape): ParamSpace {
+  const minSide = Math.min(plot.plotWidth, plot.plotDepth)
+  const maxSide = Math.max(plot.plotWidth, plot.plotDepth)
+  // Guard against zero/negative spans — the search loop should never
+  // hand us those (the pipeline rejects them upstream as invalid_input)
+  // but the math here would produce NaN bounds without a fallback.
+  if (!Number.isFinite(minSide) || minSide <= 0) return DEFAULT_SPACE
+
+  const aspectRatio = maxSide / minSide
+
+  // Inset cap: never more than 40 % of the smallest side. Floor at 0.3
+  // so we stay above the structural margin baseline and don't degenerate
+  // to a point-sample on tiny plots (where the optimizer has no business
+  // running anyway).
+  const insetMax = Math.max(0.3, Math.min(1.5, 0.4 * minSide))
+  // Orientation: near-square plots get a tight band; elongated plots
+  // get a slightly wider one. Both stay small because the footprint
+  // stage clips the rotated inset polygon against the post-setback
+  // envelope, and that envelope is much tighter than the raw plot.
+  // Empirically tuned: ±π/36 on the Phase 3-6 DOD case (30×30 default)
+  // yields 17/20 compliant; π/12 yields 6/20.
+  const orientationMax = aspectRatio > 1.5 ? Math.PI / 24 : Math.PI / 36
+
+  return {
+    ...DEFAULT_SPACE,
+    footprintInsetM: { kind: 'range', min: 0.3, max: insetMax },
+    footprintOrientation: { kind: 'range', min: -orientationMax, max: orientationMax },
+  }
+}
+
+/** Bounding-box span helper used by callers that have a polygon
+ *  rather than a pre-computed (width, depth) pair. */
+export function plotBoundingBox(
+  polygon: ReadonlyArray<readonly [number, number]>,
+): PlotShape | null {
+  if (polygon.length < 3) return null
+  let minX = Infinity
+  let maxX = -Infinity
+  let minY = Infinity
+  let maxY = -Infinity
+  for (const [x, y] of polygon) {
+    if (x < minX) minX = x
+    if (x > maxX) maxX = x
+    if (y < minY) minY = y
+    if (y > maxY) maxY = y
+  }
+  const w = maxX - minX
+  const d = maxY - minY
+  if (!Number.isFinite(w) || !Number.isFinite(d) || w <= 0 || d <= 0) return null
+  return { plotWidth: w, plotDepth: d }
+}
+
+/**
  * Sample one point from a domain using `rng()` ∈ [0, 1).
  *
  * Behaviour by kind:

@@ -46,7 +46,8 @@ import {
 } from '../objectives'
 import type { GenerationParams } from '../params'
 import { mulberry32 } from './rng'
-import { uniformRandomSampler, type Sampler } from './sampler'
+import { uniformRandomSampler, uniformSamplerFromSpace, type Sampler } from './sampler'
+import { buildParamSpace, plotBoundingBox } from '../space'
 import { createOptimizerWriter } from '../writer'
 
 /** Reasons a candidate's pipeline can fail. Mirrors the GeneratorOutput
@@ -158,11 +159,22 @@ export function runSearch(args: RunSearchInput): OptimizationResult {
     count,
     seed,
     weights = DEFAULT_WEIGHTS,
-    sampler = uniformRandomSampler,
     topK = DEFAULT_TOP_K,
     onProgress,
     progressEveryN = Math.max(1, Math.floor(count / 20)),
   } = args
+
+  // Sampler resolution. Phase 3-6 Task 1: when the caller doesn't pin a
+  // sampler, build a plot-adaptive ParamSpace from the input's plot
+  // bounding box. Falls back to the published `uniformRandomSampler`
+  // (DEFAULT_SPACE) when the bbox math degenerates — same behaviour
+  // as Phase 3-5 for any caller that overrides the sampler explicitly.
+  const sampler: Sampler =
+    args.sampler ??
+    (() => {
+      const box = plotBoundingBox(input.plotPolygon)
+      return box ? uniformSamplerFromSpace(buildParamSpace(box)) : uniformRandomSampler
+    })()
 
   const t0 = nowMs()
   const masterRng = mulberry32(seed)

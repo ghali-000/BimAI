@@ -229,3 +229,24 @@ describe('runSearch — weights affect ranking', () => {
     )
   })
 })
+
+// ── Phase 3-6 Task 1: plot-adaptive DOD ────────────────────────────────────
+
+describe('runSearch — plot-adaptive default sampler (Phase 3-6 DOD)', () => {
+  it('default 30×30 plot + default program lands ≥16/20 compliant', () => {
+    // Phase 3-6 brief DOD: with no caller-supplied sampler, runSearch
+    // resolves a plot-adaptive ParamSpace via plotBoundingBox+buildParamSpace.
+    // On a default 30×30 + default program, this should produce ≥80 %
+    // compliant samples (target: 16/20). Phase 3-5 hit only 2/20 with
+    // DEFAULT_SPACE's [0, π/2] orientation band — this test pins the fix.
+    const PLOT_30x30: [number, number][] = [
+      [0, 0], [30, 0], [30, 30], [0, 30],
+    ]
+    const r = runSearch({
+      input: { ...baseInput(), plotPolygon: PLOT_30x30 },
+      count: 20,
+      seed: 42,
+    })
+    expect(r.stats.compliant).toBeGreaterThanOrEqual(16)
+  })
+})

@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { mulberry32, nextU32 } from './search/rng'
-import { DEFAULT_SPACE, type ParamSpace, sampleFromSpace } from './space'
+import {
+  buildParamSpace,
+  DEFAULT_SPACE,
+  type ParamSpace,
+  plotBoundingBox,
+  sampleFromSpace,
+} from './space'
 
 describe('mulberry32', () => {
   it('is deterministic for a given seed', () => {
@@ -192,5 +198,140 @@ describe('sampleFromSpace — custom space overrides', () => {
     expect(seen.has(0)).toBe(true)
     expect(seen.has(1)).toBe(true)
     expect(seen.size).toBe(2) // never out of bounds
+  })
+})
+
+// ── Phase 3-6 Task 1: plot-adaptive bounds ─────────────────────────────────
+
+describe('buildParamSpace — plot-adaptive bounds', () => {
+  it('preserves DEFAULT_SPACE for spacious square plots', () => {
+    // 30×30 plot: minSide 30, 0.4 × 30 = 12 → caps at the published 1.5
+    // ceiling, so insetMax stays at DEFAULT_SPACE's value. Aspect 1.0 is
+    // square-ish so orientation tightens to ±π/36.
+    const sp = buildParamSpace({ plotWidth: 30, plotDepth: 30 })
+    expect(sp.footprintInsetM).toEqual({ kind: 'range', min: 0.3, max: 1.5 })
+    expect(sp.footprintOrientation).toEqual({
+      kind: 'range',
+      min: -Math.PI / 36,
+      max: Math.PI / 36,
+    })
+    // Other domains are untouched — only the two footprint knobs are
+    // plot-sensitive.
+    expect(sp.corridorWidthM).toEqual(DEFAULT_SPACE.corridorWidthM)
+    expect(sp.packingStrategy).toEqual(DEFAULT_SPACE.packingStrategy)
+    expect(sp.seed).toEqual(DEFAULT_SPACE.seed)
+  })
+
+  it('widens orientation domain for elongated plots', () => {
+    // 50×20: aspect 2.5 > 1.5 ⇒ orientation widens to ±π/24 (still
+    // tight — the post-setback envelope, not the raw plot, governs
+    // how much rotation the footprint stage will accept).
+    const sp = buildParamSpace({ plotWidth: 50, plotDepth: 20 })
+    expect(sp.footprintOrientation).toEqual({
+      kind: 'range',
+      min: -Math.PI / 24,
+      max: Math.PI / 24,
+    })
+  })
+
+  it('shrinks the inset cap for very small plots', () => {
+    // 4×4: 0.4 × 4 = 1.6 → still over the 1.5 ceiling, so inset stays
+    // at 1.5. 3×3: 0.4 × 3 = 1.2 ⇒ insetMax = 1.2.
+    const tight = buildParamSpace({ plotWidth: 3, plotDepth: 3 })
+    if (tight.footprintInsetM.kind !== 'range') throw new Error('want range')
+    expect(tight.footprintInsetM.min).toBeCloseTo(0.3, 12)
+    expect(tight.footprintInsetM.max).toBeCloseTo(1.2, 12)
+    // 1×1: 0.4 × 1 = 0.4 — above the 0.3 floor.
+    const tiny = buildParamSpace({ plotWidth: 1, plotDepth: 1 })
+    if (tiny.footprintInsetM.kind !== 'range') throw new Error('want range')
+    expect(tiny.footprintInsetM.min).toBeCloseTo(0.3, 12)
+    expect(tiny.footprintInsetM.max).toBeCloseTo(0.4, 12)
+  })
+
+  it('floors the inset cap at 0.3 to avoid degenerate point-samples', () => {
+    // 0.5 m × 0.5 m: 0.4 × 0.5 = 0.2 ⇒ floored to 0.3 (min == max == 0.3,
+    // a constant draw, but never below the structural margin).
+    const sp = buildParamSpace({ plotWidth: 0.5, plotDepth: 0.5 })
+    expect(sp.footprintInsetM).toEqual({ kind: 'range', min: 0.3, max: 0.3 })
+  })
+
+  it('uses DEFAULT_SPACE as a hard fallback for invalid plot dims', () => {
+    expect(buildParamSpace({ plotWidth: 0, plotDepth: 10 })).toBe(DEFAULT_SPACE)
+    expect(buildParamSpace({ plotWidth: -5, plotDepth: 5 })).toBe(DEFAULT_SPACE)
+    expect(buildParamSpace({ plotWidth: NaN, plotDepth: 5 })).toBe(DEFAULT_SPACE)
+  })
+
+  it('flips on the aspect-ratio threshold at 1.5 exactly', () => {
+    // 15×10: aspect 1.5 — at the threshold, brief-pseudo-code uses ">"
+    // which means equal lands on the square branch. Pin this so a
+    // future ">=" tweak surfaces in the diff.
+    const atThreshold = buildParamSpace({ plotWidth: 15, plotDepth: 10 })
+    expect(atThreshold.footprintOrientation).toEqual({
+      kind: 'range',
+      min: -Math.PI / 36,
+      max: Math.PI / 36,
+    })
+    // Aspect 1.51 — barely elongated.
+    const beyondThreshold = buildParamSpace({ plotWidth: 15.1, plotDepth: 10 })
+    expect(beyondThreshold.footprintOrientation).toEqual({
+      kind: 'range',
+      min: -Math.PI / 24,
+      max: Math.PI / 24,
+    })
+  })
+
+  it('orientation symmetric about zero so the median sample is the pre-3-6 default', () => {
+    // We sampled [0, π/2] before — uniform mean ≈ π/4 ≈ 45°. Now we
+    // sample symmetric ranges so the mean is 0 — the unrotated
+    // footprint is the *expected* sample, not an extreme. Pin the
+    // sign symmetry so a future widening can't quietly drop it.
+    const sp = buildParamSpace({ plotWidth: 50, plotDepth: 20 })
+    if (sp.footprintOrientation.kind !== 'range') throw new Error('want range')
+    expect(sp.footprintOrientation.min).toBeCloseTo(-sp.footprintOrientation.max, 12)
+  })
+})
+
+describe('plotBoundingBox', () => {
+  it('returns spans for a square polygon', () => {
+    expect(
+      plotBoundingBox([
+        [0, 0],
+        [30, 0],
+        [30, 30],
+        [0, 30],
+      ]),
+    ).toEqual({ plotWidth: 30, plotDepth: 30 })
+  })
+
+  it('returns spans for an elongated polygon', () => {
+    expect(
+      plotBoundingBox([
+        [0, 0],
+        [50, 0],
+        [50, 20],
+        [0, 20],
+      ]),
+    ).toEqual({ plotWidth: 50, plotDepth: 20 })
+  })
+
+  it('returns null for fewer than 3 vertices', () => {
+    expect(plotBoundingBox([])).toBeNull()
+    expect(plotBoundingBox([[0, 0]])).toBeNull()
+    expect(
+      plotBoundingBox([
+        [0, 0],
+        [1, 1],
+      ]),
+    ).toBeNull()
+  })
+
+  it('returns null for collinear vertices (zero-area bbox)', () => {
+    expect(
+      plotBoundingBox([
+        [0, 0],
+        [10, 0],
+        [20, 0],
+      ]),
+    ).toBeNull()
   })
 })

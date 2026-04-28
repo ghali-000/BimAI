@@ -8,7 +8,7 @@
 // signature now.
 
 import type { GenerationParams } from '../params'
-import { DEFAULT_SPACE, sampleFromSpace } from '../space'
+import { DEFAULT_SPACE, type ParamSpace, sampleFromSpace } from '../space'
 
 export type Sampler = (masterRng: () => number) => GenerationParams
 
@@ -20,3 +20,13 @@ export type Sampler = (masterRng: () => number) => GenerationParams
  */
 export const uniformRandomSampler: Sampler = (rng) =>
   sampleFromSpace(DEFAULT_SPACE, rng)
+
+/**
+ * Factory: bind a sampler to a specific space. Used by `runSearch`
+ * when no caller-supplied sampler is provided so we can derive
+ * plot-adaptive bounds via `buildParamSpace(plotBox)` and sample
+ * those — without changing the public Sampler type.
+ */
+export function uniformSamplerFromSpace(space: ParamSpace): Sampler {
+  return (rng) => sampleFromSpace(space, rng)
+}
