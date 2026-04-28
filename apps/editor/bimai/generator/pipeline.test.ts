@@ -235,6 +235,42 @@ describe('runGenerator (with writer)', () => {
     expect(writer.stats.deleteBatches).toBe(1)
   })
 
+  it('sweeps a pre-existing untagged Level 0 so no duplicate appears (Phase 3-6 Task 2)', () => {
+    // Reproduction for the duplicate-Level-0 bug. Pascal's `loadScene`
+    // creates an untagged `Level 0` under the building before the user
+    // ever runs the optimizer; without the level-sweep, applyPlanToScene
+    // only deletes tagged nodes, so the default Level 0 survives and the
+    // tree shows two `Level 0` entries after a Load into Scene.
+    const defaultLevel = makeNode('level_default_0', 'level', BUILDING_ID)
+    const writer = createMemoryWriter({
+      nodes: {
+        [BUILDING_ID]: {
+          ...(makeNode(BUILDING_ID, 'building', null) as unknown as Record<string, unknown>),
+          children: ['level_default_0'],
+        } as unknown as AnyNode,
+        level_default_0: defaultLevel,
+      },
+    })
+    const out = runGenerator(baseInput(), writer)
+    expect(out.ok).toBe(true)
+    if (!out.ok) return
+
+    const after = writer.getSnapshot().nodes
+    // Pascal's seed level is gone.
+    expect(after.level_default_0 as unknown).toBeUndefined()
+    // Exactly `out.plan.floorCount` level nodes remain under the building
+    // — every one of them is a generated node from this run, none from
+    // before.
+    let levelCount = 0
+    for (const n of Object.values(after)) {
+      if (n.type !== 'level') continue
+      expect(n.parentId).toBe(BUILDING_ID)
+      expect(isGenerated(n, out.plan.generationId)).toBe(true)
+      levelCount++
+    }
+    expect(levelCount).toBe(out.plan.floorCount)
+  })
+
   it('does not touch user-drawn nodes outside the building subtree', () => {
     const otherBuildingId = 'building_other' as AnyNodeId
     const otherTagged = tagAsGenerated(

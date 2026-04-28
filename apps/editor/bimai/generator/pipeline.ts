@@ -24,7 +24,7 @@ import { nanoid } from 'nanoid'
 import { computeEnvelope } from '../lib/envelope'
 import { calculatePolygonArea } from '../lib/geometry'
 import { withDefaults } from '../optimizer/params'
-import { findGeneratedNodes } from './cleanup'
+import { findGeneratedNodes, findStaleLevelNodes } from './cleanup'
 import { emitBuildingPlan } from './emit'
 import { applyBIMDefaults } from './stages/bim-defaults'
 import { placeCorridor } from './stages/corridor'
@@ -240,8 +240,22 @@ export function applyPlanToScene(
   writer.pauseHistory()
   try {
     const snapshot = writer.getSnapshot()
-    const oldIds = findGeneratedNodes(snapshot, buildingId)
-    if (oldIds.length > 0) writer.deleteNodes(oldIds)
+    // Two-pass cleanup:
+    //   (1) every node tagged `generatedBy: 'procedural-v1'` under the
+    //       target building from previous runs, and
+    //   (2) every *level* under the target building, tagged or not.
+    //
+    // (2) is what stops the "duplicate Level 0" tree entry: Pascal's
+    // `loadScene` seeds the default scene with an untagged `Level 0`
+    // under the building, so without this sweep the plan's tagged
+    // `Level 0` lands alongside the default one. The plan owns the
+    // building's level layout completely — "Load into scene" is a
+    // wholesale replace, not a merge.
+    const oldIds = new Set<AnyNodeId>([
+      ...findGeneratedNodes(snapshot, buildingId),
+      ...findStaleLevelNodes(snapshot, buildingId),
+    ])
+    if (oldIds.size > 0) writer.deleteNodes([...oldIds])
 
     const rawOps = emitBuildingPlan(plan, {
       buildingId,

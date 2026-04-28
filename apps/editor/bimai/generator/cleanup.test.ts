@@ -1,6 +1,6 @@
 import type { AnyNode, AnyNodeId } from '@pascal-app/core'
 import { describe, expect, it } from 'vitest'
-import { findGeneratedNodes } from './cleanup'
+import { findGeneratedNodes, findStaleLevelNodes } from './cleanup'
 import { tagAsGenerated } from './tag'
 
 // Structural node fixtures — see the note in tag.test.ts about avoiding
@@ -124,5 +124,62 @@ describe('findGeneratedNodes', () => {
       const found = findGeneratedNodes(scene, 'nonexistent' as AnyNodeId)
       expect(found).toEqual([])
     })
+  })
+})
+
+// ── Phase 3-6 Task 2: stale-level sweep ────────────────────────────────────
+
+describe('findStaleLevelNodes', () => {
+  it('returns every level node under a building, tagged or not', () => {
+    // Pascal's `loadScene` seeds an untagged `Level 0` under the building;
+    // a previous optimizer run leaves a tagged `Level 0` next to it. Both
+    // must appear here so the cleanup phase can sweep them in one shot.
+    const scene = buildScene([
+      makeNode('site', 'site', null),
+      makeNode('building', 'building', 'site'),
+      // Pascal's default-scene Level 0 — no tag.
+      makeNode('level_default', 'level', 'building'),
+      // Previous optimizer run's Level 0 — tagged.
+      tagAsGenerated(makeNode('level_gen', 'level', 'building'), 'gen-A'),
+    ])
+    expect(findStaleLevelNodes(scene, 'building' as AnyNodeId).sort()).toEqual([
+      'level_default',
+      'level_gen',
+    ])
+  })
+
+  it('does not pick up levels under a sibling building', () => {
+    const scene = buildScene([
+      makeNode('building_A', 'building', null),
+      makeNode('level_a0', 'level', 'building_A'),
+      makeNode('building_B', 'building', null),
+      makeNode('level_b0', 'level', 'building_B'),
+    ])
+    expect(findStaleLevelNodes(scene, 'building_A' as AnyNodeId)).toEqual([
+      'level_a0',
+    ])
+    expect(findStaleLevelNodes(scene, 'building_B' as AnyNodeId)).toEqual([
+      'level_b0',
+    ])
+  })
+
+  it('returns empty when the building has no level children', () => {
+    const scene = buildScene([
+      makeNode('building', 'building', null),
+      // Walls / slabs that aren't levels — the sweep ignores them. The
+      // generated-tag sweep handles those via findGeneratedNodes.
+      makeNode('wall', 'wall', 'building'),
+    ])
+    expect(findStaleLevelNodes(scene, 'building' as AnyNodeId)).toEqual([])
+  })
+
+  it('does not return levels with no parentId at all (defensive)', () => {
+    // A floating level (no parent) shouldn't satisfy isDescendantOf for any
+    // building — guard against accidentally sweeping unrelated nodes.
+    const scene = buildScene([
+      makeNode('building', 'building', null),
+      makeNode('level_orphan', 'level', null),
+    ])
+    expect(findStaleLevelNodes(scene, 'building' as AnyNodeId)).toEqual([])
   })
 })
