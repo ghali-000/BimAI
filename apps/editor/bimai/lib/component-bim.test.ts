@@ -168,11 +168,16 @@ describe('mergeBIMPatch', () => {
     expect(r.error.length).toBeGreaterThan(0)
   })
 
-  it('rejects negative costOverride.perM2', () => {
-    // perM2 is a number (no min), so this actually passes — pin the
-    // current behaviour so a future tightening notices.
-    const r = mergeBIMPatch(null, { costOverride: { perM2: -10 } })
-    expect(r.ok).toBe(true)
+  it('rejects negative costOverride values', () => {
+    // Tightened in Phase 3-4 follow-up: schema now has .min(0) on all
+    // three slots. Explicit zero still passes (see above) — only
+    // negatives are rejected.
+    const perM2 = mergeBIMPatch(null, { costOverride: { perM2: -10 } })
+    expect(perM2.ok).toBe(false)
+    const flat = mergeBIMPatch(null, { costOverride: { flat: -1 } })
+    expect(flat.ok).toBe(false)
+    const perM3 = mergeBIMPatch(null, { costOverride: { perM3: -0.01 } })
+    expect(perM3.ok).toBe(false)
   })
 })
 

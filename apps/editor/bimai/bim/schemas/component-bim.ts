@@ -60,9 +60,14 @@ export type BimAIMaterialId = z.infer<typeof BimAIMaterialId>
  * `perM2` falls through to the catalog rather than silently using flat.
  */
 const CostOverride = z.object({
-  perM2: z.number().optional(),
-  perM3: z.number().optional(),
-  flat: z.number().optional(),
+  // .min(0) — explicit zero is allowed (means "free"), but a negative
+  // override is rejected at the schema seam. Closes a gap pinned by the
+  // earlier "negative passes" test: there's no accounting framing in the
+  // current cost panel where a credit/refund would make sense, so the
+  // safer default is to reject.
+  perM2: z.number().min(0).optional(),
+  perM3: z.number().min(0).optional(),
+  flat: z.number().min(0).optional(),
 })
 export type CostOverride = z.infer<typeof CostOverride>
 
