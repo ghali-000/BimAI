@@ -107,6 +107,14 @@ describe('optimizer store', () => {
     expect(s.status).toBe('done')
   })
 
+  it('loadSelectedToScene increments loadRequestSeq monotonically', () => {
+    expect(useOptimizer.getState().loadRequestSeq).toBe(0)
+    useOptimizer.getState().loadSelectedToScene()
+    expect(useOptimizer.getState().loadRequestSeq).toBe(1)
+    useOptimizer.getState().loadSelectedToScene()
+    expect(useOptimizer.getState().loadRequestSeq).toBe(2)
+  })
+
   it('reset returns the store to idle from any state', () => {
     useOptimizer.getState().setError('x')
     useOptimizer.getState().reset()

@@ -42,6 +42,16 @@ interface OptimizerState {
   setCanceled: () => void
   selectCandidate: (index: number | null) => void
   reset: () => void
+  /** Fired when the user clicks "Load into scene". Task 11 wires a
+   *  subscriber that takes the selected candidate's plan and applies
+   *  it to the live Pascal scene. The store itself just bumps a
+   *  monotonic counter — subscribers diff against the previous value
+   *  to avoid double-firing. */
+  loadSelectedToScene: () => void
+  /** Counter incremented every time loadSelectedToScene is called.
+   *  Subscribers in Task 11 (e.g. an effect inside a viewer overlay)
+   *  watch for changes and run the apply pipeline. Starts at 0. */
+  loadRequestSeq: number
 }
 
 export const useOptimizer = create<OptimizerState>((set) => ({
@@ -50,6 +60,7 @@ export const useOptimizer = create<OptimizerState>((set) => ({
   result: null,
   error: null,
   selectedCandidateIndex: null,
+  loadRequestSeq: 0,
 
   start: () =>
     set({
@@ -81,4 +92,6 @@ export const useOptimizer = create<OptimizerState>((set) => ({
       error: null,
       selectedCandidateIndex: null,
     }),
+  loadSelectedToScene: () =>
+    set((s) => ({ loadRequestSeq: s.loadRequestSeq + 1 })),
 }))
