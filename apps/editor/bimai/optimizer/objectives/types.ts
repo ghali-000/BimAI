@@ -15,6 +15,7 @@
 //   - Makes the weights interpretable: the weight is exactly the
 //     objective's contribution under perfect performance.
 
+import type { Polygon2D } from '../../lib/envelope'
 import type { ZoningRules } from '../../schemas'
 import type { Program } from '../../schemas'
 import type { BuildingPlan } from '../../generator/types'
@@ -31,6 +32,10 @@ import type { CostResult } from '../../cost/types'
 export interface CandidateEvaluation {
   program: Program
   zoning: ZoningRules
+  /** Source plot polygon — needed by the envelope-containment check.
+   *  `plotArea` is precomputed from this and stored alongside so the
+   *  area-using objectives don't re-walk the polygon on every call. */
+  plotPolygon: Polygon2D
   plotArea: number
   plan: BuildingPlan
   schedule: ScheduleResult

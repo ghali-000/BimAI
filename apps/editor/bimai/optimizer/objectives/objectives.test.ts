@@ -69,9 +69,12 @@ function makeCost(perUnit: number, totalUnits: number): CostResult {
   }
 }
 
+// Footprint sits inside the 50×30 plot's setback envelope (front:5, side:3,
+// rear:4 → envelope ≈ [3,5]–[47,26]) so the envelopeContainment check
+// passes by default.
 const PLAN: BuildingPlan = {
   generationId: 'gen-test',
-  footprint: [[0, 0], [10, 0], [10, 10], [0, 10]],
+  footprint: [[10, 10], [20, 10], [20, 20], [10, 20]],
   floorCount: 1,
   floorHeight: 3,
   floors: [],
@@ -79,10 +82,20 @@ const PLAN: BuildingPlan = {
   params: DEFAULT_PARAMS,
 }
 
+// 50×30 plot — generous so default compliance checks pass against a
+// 10×10 footprint at one floor.
+const PLOT_50x30: [number, number][] = [
+  [0, 0],
+  [50, 0],
+  [50, 30],
+  [0, 30],
+]
+
 function ctx(overrides: Partial<CandidateEvaluation> = {}): CandidateEvaluation {
   return {
     program: PROGRAM,
     zoning: ZONING,
+    plotPolygon: PLOT_50x30,
     plotArea: 1500,
     plan: PLAN,
     schedule: makeSchedule([['Studio', 4, 140], ['1BR', 6, 330], ['2BR', 4, 320]]),
@@ -201,11 +214,11 @@ describe('costPerUnit', () => {
 
 // ── compliance (stub) ───────────────────────────────────────────────────────
 
-describe('compliance (stub)', () => {
-  it('returns 1.0 in Task 3 (real checks land in Task 4)', () => {
+describe('compliance', () => {
+  it('returns 1.0 when every check passes on the default fixture', () => {
     const r = compliance(ctx())
     expect(r.score).toBe(1)
-    expect(r.notes?.[0]).toMatch(/stubbed/)
+    expect(r.notes).toBeUndefined()
   })
 })
 

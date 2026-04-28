@@ -1,25 +1,23 @@
 // Compliance objective — fraction of zoning constraints satisfied.
 //
-// Phase 3-5 Task 3 ships this as a stub returning 1.0 with a note. The
-// actual constraint checks (envelope containment, FAR, coverage, height,
-// open space) land in Task 4 — they need a few helpers (slab area sums
-// vs plot area, building height = floorCount × floorHeight, etc.) that
-// also belong in this module so we don't fork the math.
+// Score = (passing checks) / (total checks). The five checks live in
+// ./checks.ts; this objective just composes them into the [0,1] shape
+// the rest of the optimizer expects.
 //
-// Contract for Task 4: this objective will return:
-//   - score = (passing checks) / (total checks)
-//   - raw  = same as score
-//   - notes lists the *failing* checks with details
-// The composer treats compliance like any other objective — weight it
-// high (e.g. 1.0 with others at 0.3) to make non-compliance dominate.
+// Notes are *failing-only* — a passing candidate gets no notes (the
+// gallery shows ✓ implicitly). Each failing-check note is the check's
+// `detail` string so the user gets actionable feedback like
+// "FAR 2.31 exceeds limit 2.0" rather than just "compliance failed".
 //
 // Why not a hard 0/1 gate (filter out non-compliant before scoring):
 //   - A candidate failing one of five checks (e.g. coverage by 2%) is
 //     informative — the gallery can show it greyed out so the user
 //     learns *why* the search couldn't satisfy that constraint.
-//   - A weighted-sum compliance with weight ≥ 1 effectively gates
-//     anyway, since 0/5 → score 0 dominates other objectives.
+//   - Weighting compliance at ≥ 1.0 in DEFAULT_WEIGHTS makes
+//     non-compliance dominate naturally; 1/5 is a 0.2 score, which
+//     pulls a candidate well below any compliant peer.
 
+import { runComplianceChecks } from './checks'
 import type {
   CandidateEvaluation,
   Objective,
@@ -27,12 +25,18 @@ import type {
 } from './types'
 
 export const compliance: Objective = (
-  _ctx: CandidateEvaluation,
+  ctx: CandidateEvaluation,
 ): ObjectiveResult => {
-  // Stub: every candidate passes until Task 4 wires the real checks.
+  const results = runComplianceChecks(ctx)
+  const total = results.length
+  const passed = results.filter((r) => r.pass).length
+  const score = total === 0 ? 1 : passed / total
+  const failNotes = results
+    .filter((r) => !r.pass)
+    .map((r) => `${r.name}: ${r.detail}`)
   return {
-    score: 1,
-    raw: 1,
-    notes: ['compliance checks stubbed — Task 4 wires envelope/FAR/coverage/height/openSpace'],
+    score,
+    raw: score,
+    notes: failNotes.length > 0 ? failNotes : undefined,
   }
 }
