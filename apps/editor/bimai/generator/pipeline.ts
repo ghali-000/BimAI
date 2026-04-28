@@ -24,6 +24,7 @@ import { computeEnvelope } from '../lib/envelope'
 import { calculatePolygonArea } from '../lib/geometry'
 import { findGeneratedNodes } from './cleanup'
 import { emitBuildingPlan } from './emit'
+import { applyBIMDefaults } from './stages/bim-defaults'
 import { placeCorridor, DEFAULT_CORRIDOR_WIDTH_M } from './stages/corridor'
 import { chooseFootprint } from './stages/footprint'
 import { planFloors } from './stages/floors'
@@ -198,10 +199,14 @@ export function runGenerator(
     const oldIds = findGeneratedNodes(snapshot, input.buildingId)
     if (oldIds.length > 0) writer.deleteNodes(oldIds)
 
-    const ops = emitBuildingPlan(plan, {
+    const rawOps = emitBuildingPlan(plan, {
       buildingId: input.buildingId,
       generationId: plan.generationId,
     })
+    // Stamp `metadata.bimai.bim` (material / fireRating / loadBearing) on
+    // every wall / slab / door / window before the writer applies. Pure
+    // post-emit pass; doesn't touch geometry or hierarchy.
+    const ops = applyBIMDefaults(rawOps)
     writer.createNodes(ops)
 
     return {

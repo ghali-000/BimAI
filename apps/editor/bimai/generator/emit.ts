@@ -241,6 +241,7 @@ function buildWallSet(
     a: Point2D,
     b: Point2D,
     bucket: Record<string, WallEntry> | null,
+    role: 'perimeter' | 'corridor' | 'party',
   ) => {
     const id = generateId('wall')
     const node: WallNode = {
@@ -256,7 +257,10 @@ function buildWallSet(
       children: [],
       frontSide: 'unknown',
       backSide: 'unknown',
-      metadata: {},
+      // wallRole lives in BimAI's namespace; the bim-defaults stage reads it
+      // to pick exterior-vs-interior + load-bearing without re-deriving from
+      // geometry. Renderer never sees it.
+      metadata: { bimai: { wallRole: role } },
     } as unknown as WallNode
     const entry: WallEntry = {
       node: tagAsGenerated(node, ctx.generationId),
@@ -270,10 +274,10 @@ function buildWallSet(
   // Perimeter — 4 walls of the floor outline. Direction goes CCW around the
   // rectangle in (u,v) for sign=+1 winding, but openings only need the start
   // and end points so winding is fine either way.
-  pushWall('long_pos', toWorld(-halfL, halfS), toWorld(halfL, halfS), perimeter)
-  pushWall('long_neg', toWorld(-halfL, -halfS), toWorld(halfL, -halfS), perimeter)
-  pushWall('short_pos', toWorld(halfL, -halfS), toWorld(halfL, halfS), perimeter)
-  pushWall('short_neg', toWorld(-halfL, -halfS), toWorld(-halfL, halfS), perimeter)
+  pushWall('long_pos', toWorld(-halfL, halfS), toWorld(halfL, halfS), perimeter, 'perimeter')
+  pushWall('long_neg', toWorld(-halfL, -halfS), toWorld(halfL, -halfS), perimeter, 'perimeter')
+  pushWall('short_pos', toWorld(halfL, -halfS), toWorld(halfL, halfS), perimeter, 'perimeter')
+  pushWall('short_neg', toWorld(-halfL, -halfS), toWorld(-halfL, halfS), perimeter, 'perimeter')
 
   // Corridor walls — one along each side of the corridor strip.
   pushWall(
@@ -281,12 +285,14 @@ function buildWallSet(
     toWorld(-halfL, corridorHalf),
     toWorld(halfL, corridorHalf),
     corridor,
+    'corridor',
   )
   pushWall(
     'corridor_neg',
     toWorld(-halfL, -corridorHalf),
     toWorld(halfL, -corridorHalf),
     corridor,
+    'corridor',
   )
 
   // Party walls — between adjacent units within each strip. We project each
@@ -301,7 +307,7 @@ function buildWallSet(
       partySeen.add(key)
       const v0 = sign * corridorHalf
       const v1 = sign * halfS
-      pushWall(key, toWorld(u, v0), toWorld(u, v1), null)
+      pushWall(key, toWorld(u, v0), toWorld(u, v1), null, 'party')
     }
   }
 
