@@ -1,5 +1,78 @@
 # BimAI Progress
 
+## Phase 3-4 — Schedule and BIM Data (complete)
+
+### What works (verified in the running app)
+
+- Sidebar grew three new tabs: **Schedule**, **Cost**, **BIM**. Generate from the Generation tab and they all light up against the same scene without further user input.
+- **Every generated node now ships with `metadata.bimai.bim`** — a validated `ComponentBIM` blob carrying `material`, `fireRating`, `loadBearing`, and an optional `costOverride`. Walls/slabs/doors/windows all stamped at emit time by the new bim-defaults pipeline stage; the BIM Properties panel reads/writes that same blob.
+- **Schedule panel** mirrors architechtures.com's sidebar: Totals (GEA / NIA / efficiency), Residential (avg unit area + per-unit-type table sorted by count desc), By-Floor breakdown, Warnings. GEA = Σ slab polygon area, NIA = Σ zone polygon area, efficiency = NIA/GEA. Default 30×30 / 2-floor scene reports GEA 968 m², NIA ≈ 530 m², efficiency ≈ 55 %.
+- **Cost panel** renders the architechtures.com hierarchy: **Above grade — modelled** (per-component €) → **Typology — estimated (€/m² × GEA)** → **Hard cost** → **Soft costs** → **Total project estimate**, plus per-m² and per-unit ratios. Editing a wall material in the BIM tab updates the cost panel live.
+- **BIM Properties panel** is selection-driven — read off `useViewer.selection.selectedIds`. Empty selection / multi-select / unsupported type all show distinct placeholders. For wall/slab/door/window: material dropdown filtered by `materialsApplicableTo(type)`, fire-rating select, load-bearing toggle (read-only for slab/door/window per phase-scope), cost-override input with a **catalog ghost caption** (`catalog: €180/m²`) so users see the baseline they're overriding.
+- **"Apply defaults" affordance** when a selected node has no `bim` blob (e.g. user-drawn nodes pre-dating Phase 3-4). One click stamps the type-default material + fire rating + structural flag.
+- 212 vitest specs (up from 195). New suites: `generator/stages/bim-defaults.test.ts` (11), `schedule/compute.test.ts` (12), `cost/compute.test.ts` (14), `lib/component-bim.test.ts` (17). Plus `bim/materials.test.ts` (existing) covers the catalog. `bun run test` green.
+- Zero console errors. Live propagation across panels verified by clicking through Generate → BIM-edit-material → watch Cost numbers change.
+
+### Cost model — design decision (locked in this phase)
+
+The brief listed three candidate cost models; user picked **(c) hybrid** with three explicit refinements:
+
+1. **Additive typology categories**, not a multiplier on structural. Categories are independent line items — `mep`, `finishes`, `generalConditions` (each €/m² × GEA) plus a `contingencyPct` applied to the running subtotal. The "structural × 2.5" pattern was rejected as opaque.
+2. **`TypologyOverride` schema** lives on `SiteNode.metadata.bimai.typologyOverride` (read path only this phase — no UI). Resolved at compute time via `resolveTypology(override)` which deep-merges over `DEFAULT_TYPOLOGY`. EU mid-rise residential 2025 baselines: mep €210/m², finishes €175/m², generalConditions €75/m², contingencyPct 8 %, softCostsPct 10 %.
+3. **Two computed totals**: `hardCost` = perComponent + typology (incl. contingency), `totalProjectCost` = hardCost × (1 + softCostsPct). Both surfaced in the panel separately so the soft-cost framing is honest.
+
+`computeCost(scene, options)` is pure and pulls **GEA from `computeSchedule`** rather than re-computing area math — schedule is the single source of truth for area. The cost panel composes the two: it runs the schedule once, reads `siteMeta.typologyOverride`, and feeds both into `computeCost`.
+
+### Wall classification — `wallRole` tag
+
+The cost layer needs disjoint wall buckets (exterior / loadBearing / interior) but the emitter doesn't know geometric role from a finished `WallNode` alone. Solution: added `wallRole: 'perimeter' | 'corridor' | 'party'` to `metadata.bimai` at emit time. The bim-defaults stage reads it deterministically:
+
+- `perimeter` → exterior, brick, A1, load-bearing
+- `corridor` / `party` → interior, drywall, A2, non-load-bearing
+
+The cost classifier then collapses the trio into the three disjoint buckets via the `EXTERIOR_WALL_MATERIALS` set + the `loadBearing` flag — order: `exterior > loadBearing > interior`, every wall in exactly one. The catalog's `applicableTo` field keeps the BIM panel dropdowns from suggesting `concrete-precast-facade` for an interior wall.
+
+### GATE 2 — BIM Properties UI placement
+
+Brief proposed two options: **(a) dedicated BIM tab** in the BimAI sidebar, or **(b) reuse Pascal's existing element-detail slot**. After grepping `EditorProps`, only `viewerSceneSlot` is exposed upstream — there's no `elementPanelSlot` to slot into. Going with **(a) dedicated tab** kept the phase boundary clean (no upstream PR required) and gave us room to grow the form. The trade-off is that the user has to context-switch tabs after selecting; mitigated by keeping the panel reactive to `useViewer.selection` so it follows the active selection automatically.
+
+### Pure helpers vs. store-bound helpers
+
+Phase 3-3 documented the three-mesh-bvh barrel crash that bites any vitest module which transitively imports `useScene` from the bare `@pascal-app/core` barrel. Phase 3-4 surfaced it again twice:
+
+- `lib/component-bim.ts` was carved out as a **pure** module (only `type` imports of `@pascal-app/core`) so all 17 of its tests collect cleanly. The panel does the actual `useScene.getState().updateNode` write inline; the helpers just compute the next blob and metadata shape.
+- `cost/compute.ts` originally imported `readSiteMetadata` from `lib/metadata.ts` (which uses `useScene`) and crashed under vitest collection. Fixed by removing the import and making `typologyOverride` an explicit `options` field — the panel reads site metadata and passes the override down. Architectural rule: **pure compute modules don't reach into the store directly.**
+
+### What's stubbed / known limitations
+
+- **Single-element BIM editing only.** `selectedIds.length > 1` shows a placeholder. A future "apply to all selected" affordance is plausible — Phase 3-5+.
+- **Load-bearing toggle is read-only for slab/door/window.** Slabs are always structural in this phase; doors/windows never are. The control still renders so the panel feels complete and a future phase introducing non-structural slabs can flip the readOnly check.
+- **`TypologyOverride` has no panel UI** — read-only path. Editing requires hand-mutating `site.metadata.bimai.typologyOverride`. Wiring a control set into the Project or Cost panel is a Phase 3-5 concern.
+- **Cost classifier uses `EXTERIOR_WALL_MATERIALS = { 'brick-exterior', 'concrete-precast-facade' }`** as a hardcoded set. If the catalog grows we'll want a `applicableTo` flag or a `category` field on the material entry instead.
+- **Catalog ghost caption only updates after material change is committed.** User edits the material dropdown → it writes immediately → ghost re-reads. There's no "preview new material's ghost on hover" affordance.
+- **No live cost-override validation in the panel.** `mergeBIMPatch` rejects via Zod and `console.warn`s; the panel doesn't surface the message inline. Pinned via tests instead. Negative `costOverride.perM2` currently passes (Zod has no min) — the test pins this so a future tightening notices.
+- **Schedule warnings are informational** — orphan zones, missing slabs, missing `unitType`. Not surfaced as hard failures.
+
+### Deviations from the brief
+
+- The cost "hybrid" model in the brief mentioned `multiplier` framing on the typology side; we replaced it with additive categories per the user's GATE 1 refinement. The `CostResult` shape now exposes both subtotals (`perComponentTotal`, `typologyTotal`) so the panel can render them as peer line items.
+- BIM helpers split into a new `bimai/lib/component-bim.ts` rather than tacked onto `bimai/lib/metadata.ts`. metadata.ts is already site/building-scoped; mixing in arbitrary-node reads would muddy the surface, and metadata.ts's `useScene` runtime import would re-trigger the vitest crash for the new test suite. Documented inline at the top of `component-bim.ts`.
+- BIM panel writes use `useScene.getState().updateNode(id, { metadata: nextMetadata as unknown as Record<string, never> })` — same boundary cast Phase 3-1 introduced for `metadata: z.json()`'s recursive type vs. the validated bimai blob.
+
+### Things that surprised me
+
+- **`as const satisfies Record<...>` narrows literal types beyond what destructured access expects.** The catalog declaration narrows each entry's `costPerM2`/`costPerUnit` to its literal type or omits the property entirely; reading `mat.costPerM2` on the union fails to typecheck. Worked around in the panel via a structural cast (`{ costPerM2?: number; costPerUnit?: number }`). Also surfaced in pre-existing `bim/materials.test.ts` errors that the test file accepts via the same access pattern — flagged but not fixed in this phase.
+- **Pascal's selection store has no `primary` field.** `useViewer((s) => s.selection)` returns `{ buildingId, levelId, zoneId, selectedIds }` — buildings/levels/zones live in their own slots, but walls/slabs/doors/windows all land in `selectedIds`. The panel uses `selectedIds.length === 1` as the proxy.
+- **Three-mesh-bvh strikes again, third time this project.** Every new pure module needs to grep its transitive import set for `useScene` before its tests run. The architectural rule (pure compute = type-only imports) caught it on cost/compute.ts after one round-trip; cheap to fix once you know the smell.
+- **Zod 4's `.enum().options` returns the literal-tuple** — handy for iterating dropdown options without re-declaring the union. Used in FireRatingField.
+- **Strip-end-clamped 2BR units have undersized GEA contribution.** The schedule sums slab polygon area for GEA, which is correct; but the byUnitType `avgUnitArea` for 2BR drops below the program's target because of the rule-3 clip. Pinned via `schedule/compute.test.ts` so the math is auditable.
+
+### What I'd like a look at before Phase 3-5
+
+1. **`TypologyOverride` UI.** The read path is wired and tested; the natural surface is either a "Cost settings" subsection in the Cost panel or a new sub-section in the Project panel. Worth a brief discussion before next phase whether per-project overrides matter enough to ship UI, or whether the read-from-metadata path is the lever-of-record.
+2. **Multi-select editing.** A "set material on all selected walls" affordance would be cheap (loop `applyPatch` over `selectedIds`) and high-leverage for users who just generated a building and want to retag all corridor walls. Decide between single-select-only (current) or batch-edit before designing the Schedule + Cost interaction with re-editing flows.
+3. **Cost-override negative-value policy.** The schema currently allows negative perM2 (no Zod `min`). Test pins the current behaviour; a future tightening should decide whether negative is invalid or means "credit / refund" (accounting framing).
+
 ## Phase 3-3 — Procedural Generator (complete)
 
 ### What works (verified in the running app + CLI)
