@@ -69,9 +69,10 @@ Phase 3-3 documented the three-mesh-bvh barrel crash that bites any vitest modul
 
 ### What I'd like a look at before Phase 3-5
 
-1. **`TypologyOverride` UI.** The read path is wired and tested; the natural surface is either a "Cost settings" subsection in the Cost panel or a new sub-section in the Project panel. Worth a brief discussion before next phase whether per-project overrides matter enough to ship UI, or whether the read-from-metadata path is the lever-of-record.
-2. **Multi-select editing.** A "set material on all selected walls" affordance would be cheap (loop `applyPatch` over `selectedIds`) and high-leverage for users who just generated a building and want to retag all corridor walls. Decide between single-select-only (current) or batch-edit before designing the Schedule + Cost interaction with re-editing flows.
-3. **Cost-override negative-value policy.** The schema currently allows negative perM2 (no Zod `min`). Test pins the current behaviour; a future tightening should decide whether negative is invalid or means "credit / refund" (accounting framing).
+1. **`TypologyOverride` UI** — **deferred to Phase 3-6** (will land alongside other construction settings; the read path is enough for 3-5).
+2. **Multi-select editing** — **deferred to Phase 3-5** alongside the optimiser overrides. Loop `applyPatch` over `selectedIds`; high-leverage once the optimiser starts producing batches users want to re-tag.
+3. **Cost-override negative-value policy** — **closed in this phase.** The `CostOverride` schema gained `.min(0)` on perM2 / perM3 / flat (commit `e253e27`). The earlier "negative passes" test was flipped to assert rejection. Explicit zero (= "free") still passes.
+4. **Architecture test for type-only imports landed** — see `bimai/architecture.test.ts`. Walks the bimai/ tree, parses every "should be pure" module via TypeScript's compiler API, and asserts every `import` of `@pascal-app/core` (the bare barrel — `'/schema'` is exempt) is type-only. One dynamically-named `it()` per file so a future violation reads as "bimai/cost/compute.ts: non-type-only import of @pascal-app/core (line 12) — pure compute modules must use type-only imports to avoid the three-mesh-bvh barrel crash". Captures the rule that's bitten three times across phases 3-3 / 3-4 in runnable form.
 
 ## Phase 3-3 — Procedural Generator (complete)
 
