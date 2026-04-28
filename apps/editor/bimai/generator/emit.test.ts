@@ -14,6 +14,7 @@ import {
 } from './emit'
 import { GENERATED_BY, isGenerated } from './tag'
 import type { BuildingPlan, FloorPlan } from './types'
+import { DEFAULT_PARAMS } from '../optimizer/params'
 
 const BUILDING_ID = 'building_test001' as AnyNodeId
 const GEN_ID = 'gen-emit-1'
@@ -49,6 +50,7 @@ function buildSingleFloorPlan(): BuildingPlan {
     floorHeight: 3,
     floors: [floor],
     warnings: [],
+    params: DEFAULT_PARAMS,
   }
 }
 
@@ -178,6 +180,7 @@ describe('emitBuildingPlan', () => {
         },
       ],
       warnings: [],
+      params: DEFAULT_PARAMS,
     }
     const ops = emitBuildingPlan(plan, {
       buildingId: BUILDING_ID,
@@ -279,6 +282,7 @@ describe('emitBuildingPlan', () => {
       floorHeight: 3,
       floors: [],
       warnings: [],
+      params: DEFAULT_PARAMS,
     }
     expect(
       emitBuildingPlan(plan, { buildingId: BUILDING_ID, generationId: GEN_ID }),

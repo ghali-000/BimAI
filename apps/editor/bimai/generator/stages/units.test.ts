@@ -174,10 +174,16 @@ describe('packUnits', () => {
   })
 
   it('returns null when the corridor consumes the whole short dimension', () => {
+    // Pass a corridor whose own metadata reflects the consumed dimension.
+    // Phase 3-5 made the corridor object the canonical source for run
+    // length + strip depth, so the test's `corridorWidth` field on its
+    // own no longer drives strip-depth derivation.
+    const consumed = placeCorridor(OUTLINE_30x10, { width: 10 })
+    if (!consumed) throw new Error('test setup: corridor at full width')
     expect(
       packUnits({
         outline: OUTLINE_30x10,
-        corridor: corridorFor(OUTLINE_30x10),
+        corridor: consumed,
         corridorWidth: 10,
         unitMix: baseMix([{ type: 'studio', count: 1, targetArea: 20 }]),
       }),

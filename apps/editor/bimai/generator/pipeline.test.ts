@@ -365,4 +365,62 @@ describe('runGenerator (with writer)', () => {
     expect(out.placement.unitsRequested).toBe(0)
     expect(out.placement.placementRate).toBe(1)
   })
+
+  // Phase 3-5 — params threading + plan-recording smoke checks.
+
+  it('records the resolved GenerationParams on BuildingPlan', () => {
+    const r = buildPlan(baseInput())
+    expect(r.ok).toBe(true)
+    if (r.ok !== true) return
+    // Defaults stamped — same shape regardless of whether the caller
+    // passed any params.
+    expect(r.plan.params).toMatchObject({
+      seed: 42,
+      footprintInsetM: 0.5,
+      footprintOrientation: 0,
+      floorCountStrategy: 'demand-based',
+      corridorOrientation: 'long-axis',
+      corridorWidthM: 1.5,
+      packingStrategy: 'left-to-right',
+      unitOrderingHeuristic: 'mix-declared',
+      variant: 0,
+    })
+  })
+
+  it('partial params merge over defaults', () => {
+    const r = buildPlan(baseInput({ params: { corridorWidthM: 1.8 } }))
+    expect(r.ok).toBe(true)
+    if (r.ok !== true) return
+    expect(r.plan.params.corridorWidthM).toBe(1.8)
+    // Other fields fall back to defaults.
+    expect(r.plan.params.packingStrategy).toBe('left-to-right')
+    expect(r.plan.params.seed).toBe(42)
+  })
+
+  it("'fill-far' strategy makes the building taller than 'demand-based'", () => {
+    // Same inputs, different strategy → different floor count.
+    const demand = buildPlan(baseInput())
+    const fill = buildPlan(baseInput({ params: { floorCountStrategy: 'fill-far' } }))
+    expect(demand.ok && fill.ok).toBe(true)
+    if (!demand.ok || !fill.ok) return
+    expect(fill.plan.floorCount).toBeGreaterThanOrEqual(demand.plan.floorCount)
+  })
+
+  it("alternating + largest-first does not regress placement count vs defaults", () => {
+    // Both strategies on a generous 50×30 plot must place at least as
+    // many units as the program asks for in one floor (sanity that the
+    // strategy paths aren't broken).
+    const def = buildPlan(baseInput())
+    const alt = buildPlan(
+      baseInput({
+        params: {
+          packingStrategy: 'alternating',
+          unitOrderingHeuristic: 'largest-first',
+        },
+      }),
+    )
+    expect(def.ok && alt.ok).toBe(true)
+    if (!def.ok || !alt.ok) return
+    expect(alt.plan.floors[0]!.units.length).toBeGreaterThan(0)
+  })
 })

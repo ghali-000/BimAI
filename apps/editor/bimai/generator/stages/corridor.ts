@@ -13,6 +13,7 @@
 // algorithm entirely (medial axis, or hand-authored splines).
 
 import type { Polygon2D, Point2D } from '../../lib/envelope'
+import type { CorridorOrientation } from '../../optimizer/params'
 import type { CorridorPlan } from '../types'
 
 /** Default double-loaded corridor width, metres. */
@@ -24,6 +25,15 @@ const RECTANGLE_TOLERANCE = 1e-3
 export interface PlaceCorridorOptions {
   /** Width across the corridor, metres. Default 1.5. */
   width?: number
+  /**
+   * Which footprint axis the corridor runs along. Defaults to `'long-axis'`
+   * — the Phase 3-3 behaviour. `'short-axis'` runs perpendicular, useful
+   * when the building is closer to square. `'auto'` picks whichever axis
+   * yields the larger habitable strip depth (i.e. the longer corridor
+   * leaves more room for facade-side units), with a tiebreak to long-axis
+   * to keep determinism.
+   */
+  orientation?: CorridorOrientation
 }
 
 export function placeCorridor(
@@ -36,19 +46,42 @@ export function placeCorridor(
   const rect = asRectangle(outline)
   if (!rect) return null
 
-  const half = width / 2
-  // Outward perpendicular to the long-axis direction: rotate +90°.
-  const px = -rect.longDir[1]
-  const py = rect.longDir[0]
+  // Pick the axis the corridor runs along. The corridor is always parallel
+  // to one of the two rectangle axes; "long" / "short" name which.
+  const orientation = options.orientation ?? 'long-axis'
+  const useShort = orientation === 'short-axis'
+  // 'auto': pick whichever leaves more habitable strip depth on each side.
+  // Strip depth is (perpendicular − corridorWidth) / 2; the longer of the
+  // two perpendicular spans wins. With a width-perpendicular short axis
+  // this is the long span, and with a long-axis corridor it's the short
+  // span — which is why long-axis is the standard residential default.
+  // The 'auto' branch flips when the rectangle is closer to square.
+  let runShort = useShort
+  if (orientation === 'auto') {
+    // Compare strip-depth feasibility on each axis. Whichever has more
+    // depth-after-corridor wins; tie → long-axis.
+    const longAxisStripDepth = (rect.shortLen - width) / 2
+    const shortAxisStripDepth = (rect.longLen - width) / 2
+    runShort = shortAxisStripDepth > longAxisStripDepth
+  }
 
-  const halfL = rect.longLen / 2
+  // Direction the corridor runs along (u), and perpendicular (p).
+  // Default — 'long-axis': u = longDir, run length = longLen.
+  // 'short-axis' (or 'auto' picked it): u = shortDir, run length = shortLen.
+  const ux = runShort ? -rect.longDir[1] : rect.longDir[0]
+  const uy = runShort ? rect.longDir[0] : rect.longDir[1]
+  const runHalf = runShort ? rect.shortLen / 2 : rect.longLen / 2
+
+  const half = width / 2
+  // Outward perpendicular to the corridor direction: rotate +90°.
+  const px = -uy
+  const py = ux
+
   const cx = rect.center[0]
   const cy = rect.center[1]
-  const ux = rect.longDir[0]
-  const uy = rect.longDir[1]
 
-  const start: Point2D = [cx - ux * halfL, cy - uy * halfL]
-  const end: Point2D = [cx + ux * halfL, cy + uy * halfL]
+  const start: Point2D = [cx - ux * runHalf, cy - uy * runHalf]
+  const end: Point2D = [cx + ux * runHalf, cy + uy * runHalf]
 
   const polygon: Polygon2D = [
     [start[0] + px * half, start[1] + py * half],
@@ -57,9 +90,14 @@ export function placeCorridor(
     [start[0] - px * half, start[1] - py * half],
   ]
 
+  const perpendicular = runShort ? rect.longLen : rect.shortLen
+  const stripDepth = (perpendicular - width) / 2
+
   return {
     polygon,
     centerline: [start, end],
+    runLength: 2 * runHalf,
+    stripDepth,
   }
 }
 

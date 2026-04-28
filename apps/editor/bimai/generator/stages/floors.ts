@@ -20,6 +20,7 @@
 import type { Program, ZoningRules } from '../../schemas'
 import type { Polygon2D } from '../../lib/envelope'
 import { calculatePolygonArea } from '../../lib/geometry'
+import type { FloorCountStrategy } from '../../optimizer/params'
 
 /**
  * Multiplier applied to summed unit areas when estimating required GFA.
@@ -37,6 +38,13 @@ export interface PlanFloorsInput {
   plotArea: number
   zoning: ZoningRules
   program: Program
+  /**
+   * Strategy for selecting floor count. Defaults to `'demand-based'` —
+   * matches the Phase 3-3 behaviour. The other two strategies always pack
+   * to one of the zoning caps regardless of program size, which is what
+   * the optimizer tries when it wants to maximise rentable area.
+   */
+  strategy?: FloorCountStrategy
 }
 
 export interface FloorsPlan {
@@ -80,9 +88,31 @@ export function planFloors(input: PlanFloorsInput): FloorsPlan | null {
   const farCapGross = zoning.maxFAR * plotArea
   const floorsByFAR = Math.max(MIN_FLOOR_COUNT, Math.floor(farCapGross / footprintArea))
 
-  // The two zoning caps form the hard ceiling.
+  // The two zoning caps form the hard ceiling — no strategy escapes them.
   const zoningCap = Math.min(floorsByHeight, floorsByFAR)
-  const floorCount = Math.min(floorsByDemand, zoningCap)
+
+  // Strategy selection. Default `'demand-based'` reproduces Phase 3-3.
+  //   - `'demand-based'` (default): smallest count that satisfies demand,
+  //      clamped by zoningCap.
+  //   - `'fill-far'`:  always pack to the FAR cap (then clamp by height).
+  //   - `'fill-height'`: always pack to the height cap (then clamp by FAR).
+  // The two `fill-*` modes never go below `MIN_FLOOR_COUNT` and never
+  // exceed `zoningCap`. They ignore `floorsByDemand` — the optimizer will
+  // still score the resulting candidate against the program via
+  // `mix-accuracy`, so over-building gets penalised at the objective seam.
+  const strategy: FloorCountStrategy = input.strategy ?? 'demand-based'
+  let floorCount: number
+  switch (strategy) {
+    case 'fill-far':
+      floorCount = Math.min(floorsByFAR, zoningCap)
+      break
+    case 'fill-height':
+      floorCount = Math.min(floorsByHeight, zoningCap)
+      break
+    default:
+      floorCount = Math.min(floorsByDemand, zoningCap)
+      break
+  }
 
   if (floorsByDemand > zoningCap) {
     if (floorsByDemand > floorsByHeight && floorsByHeight <= floorsByFAR) {

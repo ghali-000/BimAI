@@ -22,11 +22,12 @@
 import { nanoid } from 'nanoid'
 import { computeEnvelope } from '../lib/envelope'
 import { calculatePolygonArea } from '../lib/geometry'
+import { withDefaults } from '../optimizer/params'
 import { findGeneratedNodes } from './cleanup'
 import { emitBuildingPlan } from './emit'
 import { applyBIMDefaults } from './stages/bim-defaults'
-import { placeCorridor, DEFAULT_CORRIDOR_WIDTH_M } from './stages/corridor'
-import { chooseFootprint } from './stages/footprint'
+import { placeCorridor } from './stages/corridor'
+import { chooseFootprint, footprintParamsFrom } from './stages/footprint'
 import { planFloors } from './stages/floors'
 import { attachRoomsToUnits } from './stages/rooms'
 import { packUnits } from './stages/units'
@@ -56,6 +57,11 @@ export function buildPlan(
     return { ok: false, reason: 'invalid_input', issues: ['plot has < 3 vertices'] }
   }
 
+  // Resolve params once. `withDefaults` merges any partial caller override
+  // over the Phase 3-3 defaults, so a no-params call reproduces the prior
+  // pipeline byte-for-byte. Every stage downstream reads the resolved bag.
+  const params = withDefaults(input.params)
+
   const envelope = computeEnvelope(input.plotPolygon, input.zoning)
   if (!envelope.ok) {
     return {
@@ -65,7 +71,12 @@ export function buildPlan(
     }
   }
 
-  const footprint = chooseFootprint(envelope.polygon, input.zoning, input.program)
+  const footprint = chooseFootprint(
+    envelope.polygon,
+    input.zoning,
+    input.program,
+    footprintParamsFrom(params),
+  )
   if (!footprint) {
     return {
       ok: false,
@@ -80,6 +91,7 @@ export function buildPlan(
     plotArea,
     zoning: input.zoning,
     program: input.program,
+    strategy: params.floorCountStrategy,
   })
   if (!floorsResult) {
     return {
@@ -97,7 +109,10 @@ export function buildPlan(
   // commercial) without restructuring the loop.
   const floors: FloorPlan[] = []
   for (let i = 0; i < floorsResult.floorCount; i++) {
-    const corridor = placeCorridor(footprint.polygon)
+    const corridor = placeCorridor(footprint.polygon, {
+      width: params.corridorWidthM,
+      orientation: params.corridorOrientation,
+    })
     if (!corridor) {
       return {
         ok: false,
@@ -109,8 +124,10 @@ export function buildPlan(
     const packed = packUnits({
       outline: footprint.polygon,
       corridor,
-      corridorWidth: DEFAULT_CORRIDOR_WIDTH_M,
+      corridorWidth: params.corridorWidthM,
       unitMix: input.program.unitMix,
+      packingStrategy: params.packingStrategy,
+      unitOrderingHeuristic: params.unitOrderingHeuristic,
     })
     if (!packed) {
       return {
@@ -156,6 +173,7 @@ export function buildPlan(
     floorHeight: floorsResult.floorHeight,
     floors,
     warnings,
+    params,
   }
   return { ok: true, plan }
 }

@@ -9,7 +9,10 @@
 // Same as `ZoneNode.polygon`, `SlabNode.polygon`, `SiteNode.polygon.points`.
 
 import type { AnyNode, AnyNodeId } from '@pascal-app/core'
+import type { GenerationParams } from '../optimizer/params'
 import type { Program, ZoningRules } from '../schemas'
+
+export type { GenerationParams } from '../optimizer/params'
 
 // ── Inputs ───────────────────────────────────────────────────────────────────
 
@@ -21,6 +24,12 @@ export interface GeneratorInput {
   program: Program
   /** Optional. When omitted, the pipeline derives a stable seed from inputs. */
   seed?: number
+  /**
+   * Optional. When omitted (or partial), missing fields fall through to
+   * `DEFAULT_PARAMS` — the pre-3-5 pipeline behaviour. Set per-field by the
+   * optimizer; the panel UI never sets it directly.
+   */
+  params?: Partial<GenerationParams>
 }
 
 // ── Plan (intermediate) ──────────────────────────────────────────────────────
@@ -54,6 +63,19 @@ export interface RoomPlan {
 export interface CorridorPlan {
   polygon: [number, number][]
   centerline: [[number, number], [number, number]]
+  /**
+   * Corridor run length (parallel to centerline). Equals `longLen` when
+   * orientation is 'long-axis', `shortLen` when 'short-axis'. The unit
+   * packer reads this rather than re-deriving from `asRectangle`, since
+   * the packer's "long axis" is the corridor's run axis (regardless of
+   * which rectangle dimension it's parallel to).
+   */
+  runLength?: number
+  /**
+   * Strip depth on each side of the corridor — perpendicular distance
+   * from corridor edge to outline edge. Equals `(perpendicular − width)/2`.
+   */
+  stripDepth?: number
 }
 
 export interface FloorPlan {
@@ -74,6 +96,14 @@ export interface BuildingPlan {
   floors: FloorPlan[]
   /** Non-fatal issues, e.g. "could not place all studio units". */
   warnings: string[]
+  /**
+   * The fully-resolved params this plan was built with. Recorded so the
+   * optimizer can reproduce a candidate from its plan (seed + every knob)
+   * and so the live scene can show "this generation used corridor: short-axis".
+   * Always present after Phase 3-5 — null only on plans loaded from
+   * pre-3-5 fixtures.
+   */
+  params: GenerationParams
 }
 
 // ── Apply stage I/O ──────────────────────────────────────────────────────────

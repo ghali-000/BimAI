@@ -45,6 +45,10 @@
 //   - Last unit in a strip adds the trailing short end-wall (index 1).
 
 import type { Polygon2D, Point2D } from '../../lib/envelope'
+import type {
+  PackingStrategy,
+  UnitOrderingHeuristic,
+} from '../../optimizer/params'
 import type { Program } from '../../schemas'
 import type { CorridorPlan, UnitPlan } from '../types'
 import { asRectangle } from './corridor'
@@ -55,6 +59,31 @@ export interface PackUnitsInput {
   /** Corridor width perpendicular to long axis, metres. */
   corridorWidth: number
   unitMix: Program['unitMix']
+  /**
+   * Packing strategy. Defaults to `'left-to-right'` (Phase 3-3 behaviour).
+   *   - `'left-to-right'`: greedy strip-fill, stay on current strip until
+   *     it can't fit the next unit; then move to the other strip.
+   *   - `'alternating'`: toggle strip per unit. Produces a balanced
+   *     two-façade layout — both façades fill at the same rate. The
+   *     trade-off is that strip-end clipping happens earlier on both
+   *     strips rather than only once.
+   *   - `'grouped-by-type'`: when the unit type changes between
+   *     consecutive items, switch strips so types stay clustered. Good
+   *     when the program has a few large types (e.g. one penthouse,
+   *     three studios) and you want types on the same façade.
+   */
+  packingStrategy?: PackingStrategy
+  /**
+   * Order in which to attempt placement.
+   *   - `'mix-declared'` (default): the order the user listed in
+   *     `program.unitMix`. Stable, predictable.
+   *   - `'largest-first'`: descending `targetArea`. Reduces strip-end
+   *     clipping because big units that can only fit early are placed
+   *     before small ones consume their slots.
+   *   - `'smallest-first'`: ascending `targetArea`. Maximises unit count
+   *     when total area is the binding constraint.
+   */
+  unitOrderingHeuristic?: UnitOrderingHeuristic
 }
 
 export interface PackUnitsResult {
@@ -75,28 +104,61 @@ export const MAX_UNIT_WIDTH_M = 9
 const AREA_DRIFT_THRESHOLD = 0.05
 
 export function packUnits(input: PackUnitsInput): PackUnitsResult | null {
-  // `corridor` is part of the input contract for forward compatibility (we'll
-  // need its centerline for door placement at the emit stage); the packer
-  // itself only needs the corridor width to compute strip depth.
-  const { outline, corridorWidth, unitMix } = input
+  const { outline, corridor, corridorWidth, unitMix } = input
   if (!Number.isFinite(corridorWidth) || corridorWidth <= 0) return null
+  const packingStrategy: PackingStrategy =
+    input.packingStrategy ?? 'left-to-right'
+  const unitOrdering: UnitOrderingHeuristic =
+    input.unitOrderingHeuristic ?? 'mix-declared'
 
   const rect = asRectangle(outline)
   if (!rect) return null
 
-  const depth = (rect.shortLen - corridorWidth) / 2
-  // Strip depth must be positive — i.e. the corridor must fit within the
-  // building's short dimension with room left over for habitable space.
-  if (depth <= 0) return null
+  // Derive run length + strip depth + basis. When the corridor was placed
+  // along the short axis, the packer's "long axis" is actually the
+  // rectangle's short axis — using the corridor's centerline as the
+  // canonical source means this stage stops re-deriving the wrong axis.
+  // Fall back to the long-axis derivation when the corridor doesn't
+  // carry runLength (older fixtures, direct unit tests of packUnits).
+  let runLength: number
+  let stripDepth: number
+  let ux: number
+  let uy: number
+  let cx: number
+  let cy: number
+  if (
+    corridor.runLength !== undefined &&
+    corridor.stripDepth !== undefined &&
+    corridor.centerline
+  ) {
+    runLength = corridor.runLength
+    stripDepth = corridor.stripDepth
+    const [a, b] = corridor.centerline
+    const dx = b[0] - a[0]
+    const dy = b[1] - a[1]
+    const len = Math.hypot(dx, dy)
+    if (len < 1e-9) return null
+    ux = dx / len
+    uy = dy / len
+    cx = (a[0] + b[0]) / 2
+    cy = (a[1] + b[1]) / 2
+  } else {
+    runLength = rect.longLen
+    stripDepth = (rect.shortLen - corridorWidth) / 2
+    ux = rect.longDir[0]
+    uy = rect.longDir[1]
+    cx = rect.center[0]
+    cy = rect.center[1]
+  }
 
-  // Local-axis basis. u along the long axis, v perpendicular (rotated +90°).
-  const ux = rect.longDir[0]
-  const uy = rect.longDir[1]
+  // Strip depth must be positive — corridor must fit with room left over
+  // for habitable space on each side.
+  if (stripDepth <= 0) return null
+
+  const depth = stripDepth // legacy alias used by makeUnit + queue derivation
   const vx = -uy
   const vy = ux
-  const cx = rect.center[0]
-  const cy = rect.center[1]
-  const halfL = rect.longLen / 2
+  const halfL = runLength / 2
   const corridorHalf = corridorWidth / 2
 
   // Expand unitMix into a flat queue of placement attempts. Width is the
@@ -146,6 +208,17 @@ export function packUnits(input: PackUnitsInput): PackUnitsResult | null {
     }
   }
 
+  // Apply ordering heuristic. `mix-declared` (default) leaves the queue
+  // alone — the order matches `program.unitMix` after expansion. The two
+  // size-based orderings sort by `targetArea` (not the clamped `width`,
+  // which lost information for min/max-clamped entries). We use a stable
+  // sort: declared order wins for equal-area items so determinism holds.
+  if (unitOrdering === 'largest-first') {
+    queue.sort((a, b) => b.targetArea - a.targetArea)
+  } else if (unitOrdering === 'smallest-first') {
+    queue.sort((a, b) => a.targetArea - b.targetArea)
+  }
+
   // Each strip has a sign for its perpendicular direction. +1 puts the strip
   // on the +v side (inner edge at +corridorHalf, outer edge at +shortLen/2).
   const stripSigns: Array<1 | -1> = [1, -1]
@@ -180,7 +253,30 @@ export function packUnits(input: PackUnitsInput): PackUnitsResult | null {
   }
 
   let stripIdx = 0
-  outer: for (const item of queue) {
+  let prevType: string | null = null
+  for (let qi = 0; qi < queue.length; qi++) {
+    const item = queue[qi]!
+    // Strategy chooses the strip we *try first*. Fallback to the other
+    // strip is the same in every strategy (greedy two-strip search) —
+    // strategies only change the starting choice.
+    //   - 'left-to-right': continue on the current strip until it can't
+    //     fit, then move to the other. This is the previous behaviour:
+    //     stripIdx is whatever the last successful placement set it to.
+    //   - 'alternating': toggle starting strip per item. Produces a
+    //     balanced two-façade layout. The fallback path is unchanged so
+    //     when the toggled-into strip is full we still spill into the
+    //     other side.
+    //   - 'grouped-by-type': stay on the current strip while the type
+    //     repeats; switch strips when the type changes. Keeps types
+    //     clustered along façades.
+    if (packingStrategy === 'alternating') {
+      stripIdx = qi % STRIP_COUNT
+    } else if (packingStrategy === 'grouped-by-type') {
+      if (prevType !== null && prevType !== item.type) {
+        stripIdx = (stripIdx + 1) % STRIP_COUNT
+      }
+    }
+    let placed = false
     // Try strips starting from the current one. Within a strip, the only
     // way to fail is if the desired width exceeds remaining length AND the
     // remaining length is below MIN. Otherwise we either fit, or strip-end
@@ -219,11 +315,25 @@ export function packUnits(input: PackUnitsInput): PackUnitsResult | null {
       units.push(unit)
       stripUnitIndices[idx]!.push(units.length - 1)
       stripCursors[idx] = cursor + placedWidth
-      stripIdx = idx // continue on same strip until it fills
+      // For 'left-to-right' (default) and 'grouped-by-type', leave
+      // stripIdx where it landed so the next item starts on the same
+      // strip. For 'alternating', the next iteration will overwrite
+      // stripIdx anyway via `qi % STRIP_COUNT`, so leaving it here is
+      // harmless.
+      stripIdx = idx
       bumpStats(item.type, item.targetArea, unit.area)
-      continue outer
+      placed = true
+      prevType = item.type
+      break
     }
-    unplaced.push({ type: item.type, targetArea: item.targetArea })
+    if (!placed) {
+      unplaced.push({ type: item.type, targetArea: item.targetArea })
+      // Don't update prevType when an item couldn't be placed — the next
+      // item's "is this the same type as the previous *placed* one?"
+      // check should consult the last successful type, otherwise an
+      // unplaced studio in a run of studios would erroneously trigger
+      // a strip switch.
+    }
   }
 
   // Add the trailing end-wall as a facade edge on the last unit of each strip.
