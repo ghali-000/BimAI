@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { UnitPlan } from '../types'
-import { OPEN_ROOM_NAME, attachRoomsToUnits, planRooms } from './rooms'
+import { UNIT_SHELL_KIND, attachRoomsToUnits, planRooms } from './rooms'
 
 function makeUnit(overrides: Partial<UnitPlan> = {}): UnitPlan {
   return {
@@ -14,15 +14,19 @@ function makeUnit(overrides: Partial<UnitPlan> = {}): UnitPlan {
     area: 20,
     facadeEdges: [2],
     corridorEdges: [0],
+    // Default to an empty rooms array so every fixture satisfies the
+    // post-3-7 required-rooms type. `attachRoomsToUnits` overwrites this
+    // with the actual subdivision.
+    rooms: [],
     ...overrides,
   }
 }
 
-describe('planRooms (stub)', () => {
-  it('emits exactly one open room per unit', () => {
+describe('planRooms (unit-shell stub)', () => {
+  it('emits exactly one unit-shell room per unit', () => {
     const rooms = planRooms(makeUnit())
     expect(rooms).toHaveLength(1)
-    expect(rooms[0]!.name).toBe(OPEN_ROOM_NAME)
+    expect(rooms[0]!.kind).toBe(UNIT_SHELL_KIND)
   })
 
   it('matches the unit polygon and area', () => {
@@ -44,6 +48,22 @@ describe('planRooms (stub)', () => {
     const unit = makeUnit()
     expect(planRooms(unit)).not.toBe(planRooms(unit))
   })
+
+  it('emits no interior walls or doors in the unit-shell case', () => {
+    const [room] = planRooms(makeUnit())
+    expect(room!.walls).toEqual([])
+    expect(room!.doors).toEqual([])
+  })
+
+  it('reports windowAccess=true when the unit has facade edges', () => {
+    const [room] = planRooms(makeUnit({ facadeEdges: [2] }))
+    expect(room!.windowAccess).toBe(true)
+  })
+
+  it('reports windowAccess=false when the unit has no facade edges', () => {
+    const [room] = planRooms(makeUnit({ facadeEdges: [] }))
+    expect(room!.windowAccess).toBe(false)
+  })
 })
 
 describe('attachRoomsToUnits', () => {
@@ -55,25 +75,38 @@ describe('attachRoomsToUnits', () => {
     const out = attachRoomsToUnits(units)
     expect(out).toHaveLength(2)
     for (const u of out) {
-      expect(u.rooms).toBeDefined()
-      expect(u.rooms!).toHaveLength(1)
-      expect(u.rooms![0]!.name).toBe(OPEN_ROOM_NAME)
+      expect(u.rooms).toHaveLength(1)
+      expect(u.rooms[0]!.kind).toBe(UNIT_SHELL_KIND)
     }
   })
 
   it('does not mutate the input units', () => {
-    const units = [makeUnit()]
+    // Build a unit with a sentinel `rooms` reference. After the call,
+    // the input must still hold that exact reference — `attachRoomsToUnits`
+    // must produce new unit objects, not patch in place.
+    const sentinel: UnitPlan['rooms'] = []
+    const units = [makeUnit({ rooms: sentinel })]
     attachRoomsToUnits(units)
-    expect(units[0]!.rooms).toBeUndefined()
+    expect(units[0]!.rooms).toBe(sentinel)
   })
 
-  it('preserves the unit area on the open room', () => {
+  it('preserves the unit area on the unit-shell room', () => {
     const units = [makeUnit({ area: 42.5 })]
     const out = attachRoomsToUnits(units)
-    expect(out[0]!.rooms![0]!.area).toBe(42.5)
+    expect(out[0]!.rooms[0]!.area).toBe(42.5)
   })
 
   it('returns an empty array for an empty input', () => {
     expect(attachRoomsToUnits([])).toEqual([])
+  })
+
+  it('threads windowAccess through from each unit', () => {
+    const units = [
+      makeUnit({ type: 'A', facadeEdges: [2] }),
+      makeUnit({ type: 'B', facadeEdges: [] }),
+    ]
+    const out = attachRoomsToUnits(units)
+    expect(out[0]!.rooms[0]!.windowAccess).toBe(true)
+    expect(out[1]!.rooms[0]!.windowAccess).toBe(false)
   })
 })
