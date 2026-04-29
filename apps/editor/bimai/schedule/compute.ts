@@ -27,6 +27,8 @@ import type {
   ScheduleByFloor,
   ScheduleByUnitType,
   ScheduleResult,
+  ScheduleRoomBreakdown,
+  ScheduleRoomBucket,
 } from './types'
 
 export interface ScheduleSceneSnapshot {
@@ -86,8 +88,24 @@ export function computeSchedule(
     slabsByLevel.set(parent, arr)
   }
 
-  const zonesByLevel = new Map<AnyNodeId, ZoneNode[]>()
+  // Phase 3-7: zones split into "unit zones" (the unit envelope, no roomKind
+  // in metadata) and "room zones" (sub-rooms within a unit, roomKind set).
+  // NIA / per-unit-type aggregation walks unit zones only — including room
+  // zones would double-count area, since rooms tile their unit. The
+  // roomBreakdown is computed from room zones.
+  const unitZones: ZoneNode[] = []
+  const roomZones: ZoneNode[] = []
   for (const z of zones) {
+    const bimai = readBimai(z)
+    if (typeof bimai.roomKind === 'string' && bimai.roomKind.length > 0) {
+      roomZones.push(z)
+    } else {
+      unitZones.push(z)
+    }
+  }
+
+  const zonesByLevel = new Map<AnyNodeId, ZoneNode[]>()
+  for (const z of unitZones) {
     const parent = z.parentId as AnyNodeId | null
     if (!parent || !levelById.has(parent)) {
       warnings.push(`zone ${z.id}: parent level not found, dropped from schedule`)
@@ -96,6 +114,17 @@ export function computeSchedule(
     const arr = zonesByLevel.get(parent) ?? []
     arr.push(z)
     zonesByLevel.set(parent, arr)
+  }
+  // Room zones still need the same orphan check so a stray one doesn't
+  // silently distort the breakdown.
+  const liveRoomZones: ZoneNode[] = []
+  for (const z of roomZones) {
+    const parent = z.parentId as AnyNodeId | null
+    if (!parent || !levelById.has(parent)) {
+      warnings.push(`zone ${z.id}: parent level not found, dropped from schedule`)
+      continue
+    }
+    liveRoomZones.push(z)
   }
 
   // ── Pass 3: per-floor reduction ────────────────────────────────────────────
@@ -119,10 +148,11 @@ export function computeSchedule(
   // ── Pass 4: per-unit-type residential breakdown ────────────────────────────
   // Across all floors. For variable-floor layouts later this might need a
   // per-floor view too, but the panel today shows the building-wide totals.
+  // Walks unitZones only (room zones are aggregated separately into
+  // roomBreakdown below).
   const buckets = new Map<string, { count: number; totalArea: number }>()
-  for (const z of zones) {
-    const meta = (z.metadata ?? {}) as Record<string, unknown>
-    const bimai = (meta.bimai ?? {}) as Record<string, unknown>
+  for (const z of unitZones) {
+    const bimai = readBimai(z)
     const rawType = bimai.unitType
     const type = typeof rawType === 'string' && rawType.length > 0 ? rawType : '(unknown)'
     if (type === '(unknown)') {
@@ -147,8 +177,15 @@ export function computeSchedule(
   // big bucket on top" without ties bouncing run-to-run.
   byUnitType.sort((a, b) => b.count - a.count || a.type.localeCompare(b.type))
 
+  // ── Pass 5: room-kind breakdown (Phase 3-7) ────────────────────────────────
+  // Sums room zone areas grouped by canonical kind. Unit-shell zones are
+  // not emitted by the generator (unit zone alone covers the shell), so they
+  // never appear here. Unknown kinds are silently dropped — roomBreakdown is
+  // a curated, panel-ready view of the five residential room types.
+  const roomBreakdown = computeRoomBreakdown(liveRoomZones)
+
   // ── Aggregate totals ───────────────────────────────────────────────────────
-  const totalUnits = zones.length
+  const totalUnits = unitZones.length
   const efficiency = totalGEA === 0 ? 0 : totalNIA / totalGEA
   const avgUnitArea = totalUnits === 0 ? 0 : totalNIA / totalUnits
 
@@ -161,8 +198,63 @@ export function computeSchedule(
       avgUnitArea,
       byUnitType,
     },
+    roomBreakdown,
     warnings,
   }
+}
+
+// ── Room-breakdown helpers ───────────────────────────────────────────────────
+
+const ROOM_KIND_TO_KEY: Record<string, keyof ScheduleRoomBreakdown> = {
+  bedroom: 'bedrooms',
+  bathroom: 'bathrooms',
+  kitchen: 'kitchens',
+  living: 'livingRooms',
+  hallway: 'hallways',
+}
+
+function emptyBucket(): ScheduleRoomBucket {
+  return { count: 0, totalArea: 0, avgArea: 0 }
+}
+
+/** Exported for test fixtures that need a concrete `ScheduleResult`. */
+export function emptyRoomBreakdown(): ScheduleRoomBreakdown {
+  return {
+    bedrooms: emptyBucket(),
+    bathrooms: emptyBucket(),
+    kitchens: emptyBucket(),
+    livingRooms: emptyBucket(),
+    hallways: emptyBucket(),
+  }
+}
+
+function computeRoomBreakdown(roomZones: readonly ZoneNode[]): ScheduleRoomBreakdown {
+  const result: ScheduleRoomBreakdown = {
+    bedrooms: emptyBucket(),
+    bathrooms: emptyBucket(),
+    kitchens: emptyBucket(),
+    livingRooms: emptyBucket(),
+    hallways: emptyBucket(),
+  }
+  for (const z of roomZones) {
+    const bimai = readBimai(z)
+    const kind = typeof bimai.roomKind === 'string' ? bimai.roomKind : ''
+    const key = ROOM_KIND_TO_KEY[kind]
+    if (!key) continue // unknown kind: silently drop
+    const bucket = result[key]
+    bucket.count += 1
+    bucket.totalArea += polyArea(z.polygon)
+  }
+  for (const k of Object.keys(result) as Array<keyof ScheduleRoomBreakdown>) {
+    const b = result[k]
+    b.avgArea = b.count === 0 ? 0 : b.totalArea / b.count
+  }
+  return result
+}
+
+function readBimai(node: AnyNode): Record<string, unknown> {
+  const meta = (node.metadata ?? {}) as Record<string, unknown>
+  return (meta.bimai ?? {}) as Record<string, unknown>
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

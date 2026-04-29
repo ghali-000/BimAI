@@ -56,6 +56,29 @@ export interface ScheduleResidential {
   byUnitType: ScheduleByUnitType[]
 }
 
+export interface ScheduleRoomBucket {
+  count: number
+  totalArea: number
+  /** totalArea ÷ count. 0 when count is 0. */
+  avgArea: number
+}
+
+/**
+ * Per-room-kind aggregation across the building. Sourced from emitted room
+ * zones — zones whose `metadata.bimai.roomKind` is set to one of the canonical
+ * kinds. Unit-shell zones are not emitted (Phase 3-7 convention) so they
+ * do not appear here. An unknown room kind is silently dropped — the
+ * roomBreakdown is the curated, presentation-ready view; raw counts live
+ * on the unit-type buckets.
+ */
+export interface ScheduleRoomBreakdown {
+  bedrooms: ScheduleRoomBucket
+  bathrooms: ScheduleRoomBucket
+  kitchens: ScheduleRoomBucket
+  livingRooms: ScheduleRoomBucket
+  hallways: ScheduleRoomBucket
+}
+
 export interface ScheduleResult {
   /** Number of LevelNodes counted. */
   floorCount: number
@@ -63,6 +86,8 @@ export interface ScheduleResult {
   /** Sorted by `level` asc. */
   byFloor: ScheduleByFloor[]
   residential: ScheduleResidential
+  /** Phase 3-7. Aggregated from room zones (excludes unit-shell). */
+  roomBreakdown: ScheduleRoomBreakdown
   /** Non-fatal observations — e.g. "level N has no slab", "zone X has no unitType". */
   warnings: string[]
 }

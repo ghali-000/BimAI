@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest'
 import type { BuildingPlan } from '../../generator/types'
 import type { CostResult } from '../../cost/types'
+import { emptyRoomBreakdown } from '../../schedule/compute'
 import type { ScheduleResult } from '../../schedule/types'
 import type { Program, ZoningRules } from '../../schemas'
 import { DEFAULT_PARAMS } from '../params'
@@ -40,6 +41,7 @@ const SCHEDULE: ScheduleResult = {
   totals: { gea: 100, nia: 80, efficiency: 0.8 },
   byFloor: [],
   residential: { totalUnits: 1, avgUnitArea: 80, byUnitType: [] },
+  roomBreakdown: emptyRoomBreakdown(),
   warnings: [],
 }
 

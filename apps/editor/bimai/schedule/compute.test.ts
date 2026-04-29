@@ -52,6 +52,23 @@ function makeZone(
   )
 }
 
+function makeRoomZone(
+  id: string,
+  parentId: AnyNodeId,
+  polygon: [number, number][],
+  roomKind: string,
+  unitId: string,
+  unitType: string,
+): AnyNode {
+  return tagAsGenerated(
+    makeNode(id, 'zone', parentId, {
+      polygon,
+      metadata: { bimai: { roomKind, unitId, unitType } },
+    }),
+    'gen-A',
+  )
+}
+
 function buildScene(nodes: AnyNode[]) {
   const dict: Record<AnyNodeId, AnyNode> = {}
   for (const n of nodes) dict[n.id] = n
@@ -245,6 +262,143 @@ describe('computeSchedule', () => {
     ])
     const r = computeSchedule(scene)
     expect(r.byFloor.map((f) => f.level)).toEqual([0, 1, 2])
+  })
+
+  // ── Phase 3-7 Task 7: roomBreakdown ───────────────────────────────────────
+  describe('roomBreakdown (Phase 3-7)', () => {
+    it('returns all-zero buckets for an empty scene', () => {
+      const r = computeSchedule({ nodes: {} })
+      const expected = { count: 0, totalArea: 0, avgArea: 0 }
+      expect(r.roomBreakdown.bedrooms).toEqual(expected)
+      expect(r.roomBreakdown.bathrooms).toEqual(expected)
+      expect(r.roomBreakdown.kitchens).toEqual(expected)
+      expect(r.roomBreakdown.livingRooms).toEqual(expected)
+      expect(r.roomBreakdown.hallways).toEqual(expected)
+    })
+
+    it('groups room zones by canonical kind with count + totalArea + avgArea', () => {
+      // 1 unit zone (carries unitType) + 5 room zones, one per canonical kind.
+      const scene = buildScene([
+        makeLevel('level_0', 0, 'building_1' as AnyNodeId),
+        makeSlab('slab_0', 'level_0' as AnyNodeId, SQUARE_10),
+        makeZone('unit_1', 'level_0' as AnyNodeId, RECT_5x4, '2BR'), // 20
+        makeRoomZone('r_bd1', 'level_0' as AnyNodeId, RECT_5x3, 'bedroom', 'unit_1', '2BR'), // 15
+        makeRoomZone('r_bd2', 'level_0' as AnyNodeId, RECT_5x4, 'bedroom', 'unit_1', '2BR'), // 20
+        makeRoomZone('r_ba', 'level_0' as AnyNodeId, RECT_5x3, 'bathroom', 'unit_1', '2BR'), // 15
+        makeRoomZone('r_kt', 'level_0' as AnyNodeId, RECT_5x4, 'kitchen', 'unit_1', '2BR'),  // 20
+        makeRoomZone('r_lv', 'level_0' as AnyNodeId, RECT_5x3, 'living', 'unit_1', '2BR'),   // 15
+        makeRoomZone('r_hl', 'level_0' as AnyNodeId, RECT_5x4, 'hallway', 'unit_1', '2BR'),  // 20
+      ])
+      const r = computeSchedule(scene)
+      expect(r.roomBreakdown.bedrooms).toEqual({ count: 2, totalArea: 35, avgArea: 17.5 })
+      expect(r.roomBreakdown.bathrooms).toEqual({ count: 1, totalArea: 15, avgArea: 15 })
+      expect(r.roomBreakdown.kitchens).toEqual({ count: 1, totalArea: 20, avgArea: 20 })
+      expect(r.roomBreakdown.livingRooms).toEqual({ count: 1, totalArea: 15, avgArea: 15 })
+      expect(r.roomBreakdown.hallways).toEqual({ count: 1, totalArea: 20, avgArea: 20 })
+    })
+
+    it('does not double-count: NIA / unitCount come from unit zones only', () => {
+      // Unit zone (20 m²) + room zones tiling it (5+5+10 = 20 m²). NIA must
+      // equal the unit zone's area, not the sum of all zones (which would
+      // be 40 m²). totalUnits = 1, not 4.
+      const ROOM_5x1: [number, number][] = [
+        [0, 0],
+        [5, 0],
+        [5, 1],
+        [0, 1],
+      ]
+      const ROOM_5x2: [number, number][] = [
+        [0, 0],
+        [5, 0],
+        [5, 2],
+        [0, 2],
+      ]
+      const scene = buildScene([
+        makeLevel('level_0', 0, 'building_1' as AnyNodeId),
+        makeSlab('slab_0', 'level_0' as AnyNodeId, SQUARE_10), // GEA 100
+        makeZone('unit_1', 'level_0' as AnyNodeId, RECT_5x4, '1BR'), // 20
+        makeRoomZone('r_bd', 'level_0' as AnyNodeId, ROOM_5x1, 'bedroom', 'unit_1', '1BR'), // 5
+        makeRoomZone('r_ba', 'level_0' as AnyNodeId, ROOM_5x1, 'bathroom', 'unit_1', '1BR'), // 5
+        makeRoomZone('r_kt', 'level_0' as AnyNodeId, ROOM_5x2, 'kitchen', 'unit_1', '1BR'), // 10
+      ])
+      const r = computeSchedule(scene)
+      expect(r.totals.nia).toBe(20)
+      expect(r.totals.gea).toBe(100)
+      expect(r.residential.totalUnits).toBe(1)
+      expect(r.byFloor[0]!.unitCount).toBe(1)
+      expect(r.residential.byUnitType).toHaveLength(1)
+      expect(r.residential.byUnitType[0]!.type).toBe('1BR')
+      // Room breakdown still aggregates room zones.
+      expect(r.roomBreakdown.bedrooms.count).toBe(1)
+      expect(r.roomBreakdown.kitchens.totalArea).toBe(10)
+    })
+
+    it('keeps roomBreakdown all-zero in a unit-shell-only scene', () => {
+      // Studio-style: unit zone alone, no room zones (matches the generator's
+      // unit-shell suppression convention).
+      const scene = buildScene([
+        makeLevel('level_0', 0, 'building_1' as AnyNodeId),
+        makeSlab('slab_0', 'level_0' as AnyNodeId, SQUARE_10),
+        makeZone('unit_1', 'level_0' as AnyNodeId, RECT_5x4, 'Studio'),
+      ])
+      const r = computeSchedule(scene)
+      expect(r.residential.totalUnits).toBe(1)
+      expect(r.totals.nia).toBe(20)
+      expect(r.roomBreakdown.bedrooms.count).toBe(0)
+      expect(r.roomBreakdown.bathrooms.count).toBe(0)
+      expect(r.roomBreakdown.kitchens.count).toBe(0)
+      expect(r.roomBreakdown.livingRooms.count).toBe(0)
+      expect(r.roomBreakdown.hallways.count).toBe(0)
+    })
+
+    it('avgArea is 0 (not NaN) for empty buckets', () => {
+      const scene = buildScene([
+        makeLevel('level_0', 0, 'building_1' as AnyNodeId),
+        makeSlab('slab_0', 'level_0' as AnyNodeId, SQUARE_10),
+        makeZone('unit_1', 'level_0' as AnyNodeId, RECT_5x4, '1BR'),
+        makeRoomZone('r_bd', 'level_0' as AnyNodeId, RECT_5x4, 'bedroom', 'unit_1', '1BR'),
+      ])
+      const r = computeSchedule(scene)
+      expect(r.roomBreakdown.bedrooms.avgArea).toBe(20)
+      // Empty kinds: avgArea must be 0, not NaN.
+      expect(r.roomBreakdown.bathrooms.avgArea).toBe(0)
+      expect(r.roomBreakdown.kitchens.avgArea).toBe(0)
+      expect(Number.isFinite(r.roomBreakdown.bathrooms.avgArea)).toBe(true)
+      expect(Number.isFinite(r.roomBreakdown.livingRooms.avgArea)).toBe(true)
+    })
+
+    it('silently drops unknown roomKinds (curated breakdown view)', () => {
+      const scene = buildScene([
+        makeLevel('level_0', 0, 'building_1' as AnyNodeId),
+        makeSlab('slab_0', 'level_0' as AnyNodeId, SQUARE_10),
+        makeZone('unit_1', 'level_0' as AnyNodeId, RECT_5x4, '1BR'),
+        makeRoomZone('r_bd', 'level_0' as AnyNodeId, RECT_5x4, 'bedroom', 'unit_1', '1BR'),
+        makeRoomZone('r_weird', 'level_0' as AnyNodeId, RECT_5x3, 'closet', 'unit_1', '1BR'),
+      ])
+      const r = computeSchedule(scene)
+      expect(r.roomBreakdown.bedrooms.count).toBe(1)
+      // closet is not one of the canonical kinds — silently dropped.
+      const sumCounts =
+        r.roomBreakdown.bedrooms.count +
+        r.roomBreakdown.bathrooms.count +
+        r.roomBreakdown.kitchens.count +
+        r.roomBreakdown.livingRooms.count +
+        r.roomBreakdown.hallways.count
+      expect(sumCounts).toBe(1)
+    })
+
+    it('is deterministic across runs given the same scene', () => {
+      const scene = buildScene([
+        makeLevel('level_0', 0, 'building_1' as AnyNodeId),
+        makeSlab('slab_0', 'level_0' as AnyNodeId, SQUARE_10),
+        makeZone('unit_1', 'level_0' as AnyNodeId, RECT_5x4, '1BR'),
+        makeRoomZone('r_bd', 'level_0' as AnyNodeId, RECT_5x3, 'bedroom', 'unit_1', '1BR'),
+        makeRoomZone('r_kt', 'level_0' as AnyNodeId, RECT_5x4, 'kitchen', 'unit_1', '1BR'),
+      ])
+      const r1 = computeSchedule(scene)
+      const r2 = computeSchedule(scene)
+      expect(r1.roomBreakdown).toEqual(r2.roomBreakdown)
+    })
   })
 
   it('efficiency in (0, 1) for realistic mid-rise input', () => {

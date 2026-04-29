@@ -4,6 +4,7 @@
 
 import { describe, expect, it } from 'vitest'
 import type { CostResult } from '../../cost/types'
+import { emptyRoomBreakdown } from '../../schedule/compute'
 import type { ScheduleResult } from '../../schedule/types'
 import type { BuildingPlan } from '../../generator/types'
 import { DEFAULT_PARAMS } from '../params'
@@ -49,6 +50,7 @@ function makeSchedule(byUnitType: Array<[string, number, number]>): ScheduleResu
         avgArea: count > 0 ? totalArea / count : 0,
       })),
     },
+    roomBreakdown: emptyRoomBreakdown(),
     warnings: [],
   }
 }
