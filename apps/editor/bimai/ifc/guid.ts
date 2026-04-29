@@ -20,33 +20,11 @@
 // not data loss. SHA-1 / SHA-256 via Web Crypto would be async, forcing
 // every emitter into Promise plumbing for no real benefit at our scale.
 
+import { cyrb128 } from '../lib/hash'
+
 /** IFC's 64-symbol base64 alphabet (per ISO-10303 / buildingSMART spec). */
 const IFC_BASE64 =
   '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_$'
-
-/**
- * cyrb128 — a 128-bit non-cryptographic hash. Public-domain reference
- * implementation, ported as-is. Returns a tuple of four 32-bit unsigned
- * integers; concatenate them MSB-first to get 16 bytes / 128 bits.
- */
-function cyrb128(str: string): [number, number, number, number] {
-  let h1 = 1779033703
-  let h2 = 3144134277
-  let h3 = 1013904242
-  let h4 = 2773480762
-  for (let i = 0; i < str.length; i++) {
-    const k = str.charCodeAt(i)
-    h1 = h2 ^ Math.imul(h1 ^ k, 597399067)
-    h2 = h3 ^ Math.imul(h2 ^ k, 2869860233)
-    h3 = h4 ^ Math.imul(h3 ^ k, 951274213)
-    h4 = h1 ^ Math.imul(h4 ^ k, 2716044179)
-  }
-  h1 = Math.imul(h3 ^ (h1 >>> 18), 597399067)
-  h2 = Math.imul(h4 ^ (h2 >>> 22), 2869860233)
-  h3 = Math.imul(h1 ^ (h3 >>> 17), 951274213)
-  h4 = Math.imul(h2 ^ (h4 >>> 19), 2716044179)
-  return [h1 >>> 0, h2 >>> 0, h3 >>> 0, h4 >>> 0]
-}
 
 /**
  * Encode a 128-bit value (4×uint32, MSB-first) as a 22-character IFC
