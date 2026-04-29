@@ -14,7 +14,12 @@
 // stages later (BLF packing, optimisation), revisit and move work off the
 // click thread.
 
-import { useState } from 'react'
+import { type AnyNode, type AnyNodeId, useScene } from '@pascal-app/core'
+import { useEffect, useRef, useState } from 'react'
+import { findGeneratedNodes } from '../../generator/cleanup'
+import { createPascalSceneWriter } from '../../generator/pascal-writer'
+import { runGenerator } from '../../generator/pipeline'
+import type { GeneratorOutput } from '../../generator/types'
 import {
   useActiveSite,
   useFirstBuildingId,
@@ -24,10 +29,14 @@ import {
   readBuildingMetadata,
   readSiteMetadata,
 } from '../../lib/metadata'
-import { createPascalSceneWriter } from '../../generator/pascal-writer'
-import { runGenerator } from '../../generator/pipeline'
-import type { GeneratorOutput } from '../../generator/types'
 import type { Program, ZoningRules } from '../../schemas'
+// `exportToIFC` is a tiny wrapper over the writer; web-ifc's wasm
+// (~3 MB) sits behind a dynamic import inside it, so importing the
+// wrapper statically here does NOT pull wasm into the panel chunk.
+import {
+  type ExportStatus,
+  exportToIFC,
+} from '../../ifc/export'
 
 const DEFAULT_ZONING: ZoningRules = {
   setbacks: { front: 5, side: 3, rear: 4 },
@@ -139,6 +148,13 @@ export function GenerationPanel() {
       </section>
 
       {last && <ResultSection result={last} />}
+
+      {/* Export sits below the result block on purpose — the mental
+          model is "I generated → here's the result → I can export this".
+          We render it whether or not `last` is set; the disabled state
+          (no generated nodes for this building) carries the prerequisite
+          rather than hiding the affordance. */}
+      <ExportSection buildingId={buildingId} siteId={site.id} />
     </div>
   )
 }
@@ -240,4 +256,163 @@ function ResultSection({ result }: { result: GeneratorOutput }) {
       )}
     </section>
   )
+}
+
+// ── IFC export ──────────────────────────────────────────────────────────────
+//
+// Disabled until at least one generated node exists for the active
+// building (taught via tooltip). On click: lazy-load wasm, build the
+// IFC bytes, push a Blob download, surface a green "Exported …" line
+// for ~5 seconds. Errors render red and persist until the next click.
+//
+// Status progression in the button label: idle → "Loading IFC engine…"
+// (first-call wasm fetch + Init) → "Exporting…" (writer running) →
+// "Done" (briefly, until the result line takes over). The two pre-done
+// states are user-visible because the wasm fetch can take 1-2 s on a
+// cold cache and "stuck" buttons feel broken otherwise.
+
+const RESULT_FADE_MS = 5_000
+
+interface ExportFeedback {
+  kind: 'ok' | 'error'
+  message: string
+}
+
+function ExportSection({
+  buildingId,
+  siteId,
+}: { buildingId: AnyNodeId; siteId: AnyNodeId }) {
+  // Subscribe to Pascal's node dictionary so the disabled-state recomputes
+  // automatically the moment the generator commits its first nodes — without
+  // this the button stays greyed out until the user clicks somewhere.
+  const nodes = useScene((s) => s.nodes) as Record<AnyNodeId, AnyNode>
+  const [status, setStatus] = useState<ExportStatus | 'idle'>('idle')
+  const [feedback, setFeedback] = useState<ExportFeedback | null>(null)
+  const fadeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const generatedCount = findGeneratedNodes({ nodes }, buildingId).length
+  const hasGenerated = generatedCount > 0
+  const busy = status !== 'idle' && status !== 'done' && status !== 'error'
+  const disabled = !hasGenerated || busy
+
+  // Auto-clear the success/error chip after RESULT_FADE_MS. Cancelled if
+  // the user clicks again before then (the next click clears feedback up
+  // front and either restarts the timer on success or sets a fresh
+  // error).
+  useEffect(() => {
+    if (!feedback) return
+    fadeTimer.current = setTimeout(() => setFeedback(null), RESULT_FADE_MS)
+    return () => {
+      if (fadeTimer.current) clearTimeout(fadeTimer.current)
+    }
+  }, [feedback])
+
+  const handleClick = async () => {
+    if (disabled) return
+    // Clicking again while a chip is showing dismisses it; matches the
+    // "click button again to dismiss" rule from the integration spec.
+    if (feedback) {
+      setFeedback(null)
+      return
+    }
+    if (fadeTimer.current) clearTimeout(fadeTimer.current)
+
+    const siteMeta = readSiteMetadata(siteId)
+    const projectName = siteMeta.project?.name
+    try {
+      const { bytes, filename } = await exportToIFC(
+        { nodes },
+        {
+          ...(projectName !== undefined && { projectName }),
+          // Use site id as the salt so two sibling sites never share GUIDs
+          // even when their project names match.
+          projectSalt: `${siteId}|${projectName ?? 'bimai_export'}`,
+          onStatus: setStatus,
+        },
+      )
+      downloadBlob(
+        new Blob([bytes as BlobPart], { type: 'model/ifc' }),
+        filename,
+      )
+      const sizeKb = Math.max(1, Math.round(bytes.length / 1024))
+      setFeedback({
+        kind: 'ok',
+        message: `Exported ${filename} · ${sizeKb} KB`,
+      })
+    } catch (err) {
+      setFeedback({
+        kind: 'error',
+        message: err instanceof Error ? err.message : String(err),
+      })
+    } finally {
+      // Hold on the terminal status briefly so the label transition is
+      // visible, then drop back to idle so the button is clickable again.
+      setStatus('idle')
+    }
+  }
+
+  return (
+    <section className="flex flex-col gap-1.5 border-border/50 border-t pt-3">
+      <h3 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
+        Export
+      </h3>
+      <button
+        className="w-full cursor-pointer rounded-md border border-border bg-background px-3 py-2 font-medium text-foreground text-sm transition-opacity hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+        disabled={disabled}
+        onClick={handleClick}
+        title={!hasGenerated ? 'Generate a building first' : undefined}
+        type="button"
+      >
+        {labelForStatus(status, hasGenerated)}
+      </button>
+      {feedback && (
+        <p
+          className={
+            feedback.kind === 'ok'
+              ? 'text-emerald-300 text-xs'
+              : 'text-red-300 text-xs'
+          }
+        >
+          {feedback.message}
+        </p>
+      )}
+      <p className="text-muted-foreground text-xs">
+        IFC4 STEP file. Opens in BIMcollab Zoom, Solibri Anywhere, and
+        other BIM viewers.
+      </p>
+    </section>
+  )
+}
+
+function labelForStatus(
+  status: ExportStatus | 'idle',
+  hasGenerated: boolean,
+): string {
+  switch (status) {
+    case 'loading-engine':
+      return 'Loading IFC engine…'
+    case 'exporting':
+      return 'Exporting…'
+    case 'done':
+      return 'Done'
+    case 'error':
+      return 'Export as IFC'
+    case 'idle':
+      return hasGenerated ? 'Export as IFC' : 'Export as IFC'
+  }
+}
+
+// Tiny blob-download helper. Pascal has the same five lines in
+// `packages/editor/src/components/editor/export-manager.tsx` but it
+// isn't exported, so we inline it here rather than reach across the
+// package boundary. Unit tests don't exercise this path — JSDOM
+// doesn't fully support `URL.createObjectURL` and the panel test
+// (when we add one) will mock it.
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  link.click()
+  URL.revokeObjectURL(url)
 }
