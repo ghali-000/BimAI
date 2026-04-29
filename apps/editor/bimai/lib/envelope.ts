@@ -106,19 +106,36 @@ export function computeEnvelope(
   const ccwPlot = ensureCCW(plotPolygon)
   const inset = ensureCCW(insetPolygon(plotPolygon, d))
 
-  // Authoritative containment check: if the inset has any area outside the
-  // plot, the analytic offset overflowed (setbacks too large or self-intersecting
-  // for a rotated/concave plot). A previous bbox-based heuristic was wrong in
-  // both directions for rotated plots — false positives on valid insets and
-  // false negatives on inverted insets whose bbox happens to fit. Don't bring
-  // it back without re-deriving why this check is insufficient.
-  const overflow = polygonClipping.difference([inset], [ccwPlot])
-  if (overflow.length > 0) return { ok: false, reason: 'plot_too_small' }
+  // Authoritative containment check via intersection area equality.
+  // If |inset ∩ plot| ≈ |inset|, the inset is contained in the plot.
+  // Otherwise the analytic offset overflowed (setbacks too large or
+  // self-intersecting for a rotated/concave plot).
+  //
+  // Earlier this used polygonClipping.difference([inset], [ccwPlot]) and
+  // checked .length>0, but polygon-clipping@0.15.7's sweep-line crashes
+  // ("Cannot read properties of null (reading '0')") on certain valid
+  // concentric-rectangle inputs under Turbopack ESM. Area comparison via
+  // .intersection is equivalent and stable.
+  // Earlier still this used a bbox heuristic which was wrong in both
+  // directions for rotated plots — don't bring it back.
+  const insetArea = Math.abs(calculatePolygonArea(inset))
+  if (insetArea <= 0) return { ok: false, reason: 'plot_too_small' }
 
-  // Inset is contained in plot. Clip via intersection to materialise the final
-  // polygon (handles edge cases like a self-touching inset in concave plots).
   const clipped = polygonClipping.intersection([inset], [ccwPlot])
   if (clipped.length === 0) return { ok: false, reason: 'plot_too_small' }
+
+  // Sum area across all returned pieces; compare to inset area.
+  let totalClippedArea = 0
+  for (const piece of clipped) {
+    const ring = piece[0]
+    if (!ring || ring.length < 4) continue
+    const open: Polygon2D = ring.slice(0, -1).map((p) => [p[0], p[1]])
+    totalClippedArea += Math.abs(calculatePolygonArea(open))
+  }
+  // Tolerance scales with area magnitude (1e-6 relative).
+  if (totalClippedArea + 1e-6 * Math.max(insetArea, 1) < insetArea) {
+    return { ok: false, reason: 'plot_too_small' }
+  }
 
   // Pick the largest ring (outer boundary of the largest piece).
   let best: Polygon2D | null = null
