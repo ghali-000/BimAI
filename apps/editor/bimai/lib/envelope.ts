@@ -24,6 +24,18 @@ function ensureCCW(poly: Polygon2D): Polygon2D {
   return signedArea(poly) < 0 ? [...poly].reverse() : poly
 }
 
+// Validates that every vertex coordinate is a finite number. Catches the
+// failure modes that NaN-poison the rest of the pipeline:
+//   - persisted-scene corruption (vertex held [null, null] mid-edit)
+//   - upstream callers passing Infinity / -Infinity (e.g. degenerate camera math)
+function isFinitePolygon(poly: Polygon2D): boolean {
+  for (const p of poly) {
+    if (!p) return false
+    if (!Number.isFinite(p[0]) || !Number.isFinite(p[1])) return false
+  }
+  return true
+}
+
 // Inward normal for edge a→b in a CCW polygon: rotate edge direction +90°.
 // Edge dir = (dx, dy); inward normal = (-dy, dx) normalized.
 function offsetEdgeInward(a: Point2D, b: Point2D, d: number): [Point2D, Point2D] {
@@ -94,6 +106,14 @@ export function computeEnvelope(
   zoning: ZoningRules,
 ): EnvelopeResult {
   if (plotPolygon.length < 3) return { ok: false, reason: 'invalid_plot' }
+  // Reject polygons with non-finite (NaN / null / undefined / Infinity)
+  // vertex coordinates. Without this, NaN coordinates flow through
+  // signedArea (NaN < 0 is false → CCW gate accepted), insetPolygon (NaN
+  // propagates through every offset edge), and finally crash polygon-clipping
+  // with "Cannot read properties of null (reading '0')" deep inside its
+  // sweep-line. Persisted scenes with partially-edited sites have produced
+  // this in practice (a vertex briefly held [null, null] in localStorage).
+  if (!isFinitePolygon(plotPolygon)) return { ok: false, reason: 'invalid_plot' }
   const plotArea = calculatePolygonArea(plotPolygon)
   if (plotArea <= 0) return { ok: false, reason: 'invalid_plot' }
 
@@ -111,13 +131,12 @@ export function computeEnvelope(
   // Otherwise the analytic offset overflowed (setbacks too large or
   // self-intersecting for a rotated/concave plot).
   //
-  // Earlier this used polygonClipping.difference([inset], [ccwPlot]) and
-  // checked .length>0, but polygon-clipping@0.15.7's sweep-line crashes
-  // ("Cannot read properties of null (reading '0')") on certain valid
-  // concentric-rectangle inputs under Turbopack ESM. Area comparison via
-  // .intersection is equivalent and stable.
-  // Earlier still this used a bbox heuristic which was wrong in both
-  // directions for rotated plots — don't bring it back.
+  // The intersection result is reused below to materialise the final
+  // polygon (handles edge cases like a self-touching inset in concave
+  // plots), so a single .intersection call covers both jobs.
+  // An earlier version used a bbox heuristic which was wrong in both
+  // directions for rotated plots — don't bring it back without re-deriving
+  // why this check is insufficient.
   const insetArea = Math.abs(calculatePolygonArea(inset))
   if (insetArea <= 0) return { ok: false, reason: 'plot_too_small' }
 

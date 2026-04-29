@@ -98,6 +98,63 @@ describe('computeEnvelope', () => {
     })
   })
 
+  // Regression — locks the null-vertex guard. Persisted scenes have surfaced
+  // a polygon with [null, null] as the first vertex (mid-edit corruption).
+  // Without the isFinitePolygon gate, NaN propagated through signedArea →
+  // ensureCCW → insetPolygon and crashed polygon-clipping's sweep-line with
+  // "Cannot read properties of null (reading '0')". Must return invalid_plot,
+  // never throw.
+  describe('non-finite vertex guard (regression)', () => {
+    it('rejects a polygon with [null, null] as a vertex', () => {
+      const corrupted: [number, number][] = [
+        [null as unknown as number, null as unknown as number],
+        [41, -15],
+        [41, 15],
+        [-15, 15],
+      ]
+      const result = computeEnvelope(corrupted, baseZoning)
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.reason).toBe('invalid_plot')
+    })
+
+    it('rejects polygons containing NaN coordinates', () => {
+      const corrupted: [number, number][] = [
+        [Number.NaN, 0],
+        [10, 0],
+        [10, 10],
+        [0, 10],
+      ]
+      const result = computeEnvelope(corrupted, baseZoning)
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.reason).toBe('invalid_plot')
+    })
+
+    it('rejects polygons containing Infinity', () => {
+      const corrupted: [number, number][] = [
+        [0, 0],
+        [Number.POSITIVE_INFINITY, 0],
+        [10, 10],
+        [0, 10],
+      ]
+      const result = computeEnvelope(corrupted, baseZoning)
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.reason).toBe('invalid_plot')
+    })
+
+    it('does not throw on undefined-vertex input', () => {
+      const corrupted: [number, number][] = [
+        undefined as unknown as [number, number],
+        [10, 0],
+        [10, 10],
+        [0, 10],
+      ]
+      expect(() => computeEnvelope(corrupted, baseZoning)).not.toThrow()
+      const result = computeEnvelope(corrupted, baseZoning)
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.reason).toBe('invalid_plot')
+    })
+  })
+
   it('handles CW-oriented input by treating it as the same plot', () => {
     const ccw: [number, number][] = [
       [0, 0],
