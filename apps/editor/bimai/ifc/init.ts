@@ -48,7 +48,16 @@ export async function initIfcApi(): Promise<IfcAPI> {
       // `/wasm/` is served by Next.js out of `apps/editor/public/wasm/`.
       // The trailing slash is required — `SetWasmPath` concatenates the
       // wasm filename onto the path verbatim.
-      api.SetWasmPath('/wasm/')
+      //
+      // The second argument (`absolute`) MUST be true. With `false` (the
+      // default), web-ifc's locateFileHandler computes
+      //   `currentScriptPath + '/wasm/' + 'web-ifc-mt.wasm'`
+      // — concatenating onto the executing JS chunk's URL — which under
+      // Turbopack resolves to `/_next/static/chunks/.../wasm/web-ifc-mt.wasm`
+      // and 404s. With `absolute=true`, the runtime returns the path
+      // verbatim, fetching `/wasm/web-ifc-mt.wasm` from the Next.js
+      // static-asset root where copy-ifc-wasm.mjs put it.
+      api.SetWasmPath('/wasm/', true)
     }
     await api.Init()
     return api

@@ -434,6 +434,15 @@ function emitDoorOnWall(
     id,
     type: 'door',
     parentId: wall.id,
+    // The DoorNode schema carries an explicit optional `wallId` for
+    // host-wall reference. Pascal itself doesn't currently consume it,
+    // but the IFC writer uses it to resolve the door's host placement —
+    // without this, doors fall through to the storey placement and end
+    // up as a diagonal staircase in BIMcollab. Set it eagerly so the
+    // schema invariant ("doors/windows reference their host wall")
+    // holds at emit time, decoupled from any future Pascal restructure
+    // that might change `parentId`.
+    wallId: wall.id,
     visible: true,
     position: [clamped, DEFAULT_DOOR_HEIGHT_M / 2, 0],
     rotation: [0, 0, 0],
@@ -477,6 +486,9 @@ function emitWindowOnWall(
     id,
     type: 'window',
     parentId: wall.id,
+    // See emitDoorOnWall: the writer keys host resolution off `wallId`,
+    // not `parentId`. Set both so the schema invariant holds eagerly.
+    wallId: wall.id,
     visible: true,
     position: [
       clamped,

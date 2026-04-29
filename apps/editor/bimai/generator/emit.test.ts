@@ -289,6 +289,40 @@ describe('emitBuildingPlan', () => {
     ).toEqual([])
   })
 
+  // Regression: the IFC writer keys host-wall resolution off the
+  // `wallId` field on door / window nodes (Pascal schema:
+  // `door.ts:29`, `window.ts:16`). Earlier emit passes only set
+  // `parentId`, leaving `wallId` undefined — which made the writer
+  // fall back to the storey placement, producing a "diagonal
+  // staircase" pattern in BIMcollab (doors and windows offset by the
+  // wall's world position, embedded in the storey rather than the
+  // wall, no opening cut). Assert the actual invariant: every emitted
+  // door / window has `wallId` set, and that id points at a real
+  // `wall`-typed op. We do *not* assert `wallId === parentId` —
+  // they're allowed to legitimately decouple in the future, the
+  // semantic property is "the wallId points at the host wall".
+  it('emits doors and windows with a wallId that points at a real wall op', () => {
+    const allOps = emitBuildingPlan(buildSingleFloorPlan(), {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    let openingCount = 0
+    for (const op of allOps) {
+      if (op.node.type !== 'door' && op.node.type !== 'window') continue
+      openingCount++
+      const wallId = (op.node as unknown as { wallId?: string }).wallId
+      expect(wallId, `${op.node.type} ${op.node.id} has no wallId`).toBeDefined()
+      const host = allOps.find((o) => o.node.id === wallId)
+      expect(
+        host?.node.type,
+        `${op.node.type} ${op.node.id} wallId ${wallId} points at non-wall (${host?.node.type ?? 'missing'})`,
+      ).toBe('wall')
+    }
+    // Sanity: the fixture must actually emit some openings; otherwise
+    // the invariant above is vacuously satisfied.
+    expect(openingCount).toBeGreaterThan(0)
+  })
+
   it('clamps openings into wall bounds when the midpoint would put them past the end', () => {
     // Use a very long unit so the door midpoint sits well inside the corridor wall.
     const plan = buildSingleFloorPlan()
