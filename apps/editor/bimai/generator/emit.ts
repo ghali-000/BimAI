@@ -233,6 +233,13 @@ function emitRoomZones(
 ): NodeOp[] {
   const ops: NodeOp[] = []
   for (const room of unit.rooms ?? []) {
+    // Suppress unit-shell rooms: their polygon equals the unit zone's
+    // polygon, so emitting both would double-count area in the schedule
+    // aggregation (NIA, room breakdown). The unit zone alone covers the
+    // shell. Tasks 7 (schedule) and 9 (IFC) rely on this convention:
+    // Studios → 1 IfcSpace (the unit zone); larger units → 1 unit IfcSpace
+    // + N room IfcSpaces with IfcRelAggregates.
+    if (room.kind === 'unit-shell') continue
     const id = generateId('zone')
     const node: ZoneNode = {
       object: 'node',

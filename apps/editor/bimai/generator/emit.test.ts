@@ -546,9 +546,11 @@ describe('emitBuildingPlan — room zones (Phase 3-7 Task 6)', () => {
     for (const i of roomZoneIdxs) expect(i).toBeGreaterThan(unitZoneIdx)
   })
 
-  it('falls back to the unit-shell room when subdivision fails (one zone, kind=unit-shell)', () => {
-    // Unknown unit type → no template → unit-shell. Room zone count = 1
-    // per unit; roomKind = 'unit-shell'.
+  it('suppresses unit-shell room zones (unit zone alone covers the shell)', () => {
+    // Unknown unit type → no template → unit-shell. The unit-shell room's
+    // polygon equals the unit zone's polygon, so emitting a separate room
+    // zone would double-count area in the schedule. The convention: unit
+    // zone alone represents the shell; no room zone is emitted.
     const corridor = placeCorridor(OUTLINE_30x10)!
     const polygon: [number, number][] = [
       [0, 0],
@@ -581,15 +583,19 @@ describe('emitBuildingPlan — room zones (Phase 3-7 Task 6)', () => {
       buildingId: BUILDING_ID,
       generationId: GEN_ID,
     })
-    const roomZones = ops.filter((o) => {
+    const zones = ops.filter((o) => o.node.type === 'zone')
+    const roomZones = zones.filter((o) => {
       const meta = o.node.metadata as { bimai?: { roomKind?: string } }
-      return o.node.type === 'zone' && meta?.bimai?.roomKind !== undefined
+      return meta?.bimai?.roomKind !== undefined
     })
-    expect(roomZones).toHaveLength(1)
-    expect(
-      (roomZones[0]!.node.metadata as { bimai: { roomKind: string } }).bimai
-        .roomKind,
-    ).toBe('unit-shell')
+    // No room zones for unit-shell units.
+    expect(roomZones).toHaveLength(0)
+    // Unit zone alone is emitted for the shell.
+    const unitZones = zones.filter((o) => {
+      const meta = o.node.metadata as { bimai?: { unitType?: string; roomKind?: string } }
+      return meta?.bimai?.unitType === 'made-up-type' && meta?.bimai?.roomKind === undefined
+    })
+    expect(unitZones).toHaveLength(1)
   })
 
   it('emits no extra zones for the pre-3-7 fixture (units without rooms)', () => {
