@@ -42,6 +42,9 @@ import type {
 // ── Tunables ─────────────────────────────────────────────────────────────────
 
 export const DEFAULT_WALL_THICKNESS_M = 0.15
+/** Interior partition between two rooms inside the same unit. Thinner than
+ *  the unit envelope (which is structural perimeter or party wall). */
+export const DEFAULT_PARTITION_THICKNESS_M = 0.1
 export const DEFAULT_DOOR_WIDTH_M = 0.9
 export const DEFAULT_DOOR_HEIGHT_M = 2.1
 export const DEFAULT_WINDOW_WIDTH_M = 1.5
@@ -93,6 +96,15 @@ function emitFloor(
   const wallSet = buildWallSet(floor, plan, ctx)
   for (const w of wallSet.all) {
     ops.push({ node: w.node, parentId: levelId })
+  }
+
+  // Room-partition walls (Phase 3-7 Task 5). One WallNode per shared
+  // interior edge across all units on this floor; deduped by the stable
+  // RoomWall.id assigned by `buildRoomWalls` so a single drywall between
+  // bedroom and hallway materialises once. Drywall (interior, non-load-
+  // bearing) — bim-defaults stamps the material from the wallRole tag.
+  for (const partition of emitRoomPartitions(floor, plan, ctx)) {
+    ops.push({ node: partition, parentId: levelId })
   }
 
   // Zones (one per unit).
@@ -304,6 +316,60 @@ function buildWallSet(
   }
 
   return { all, perimeter, corridor }
+}
+
+/**
+ * Materialise interior partition walls for every room subdivision on the
+ * floor. Walks `floor.units[*].rooms[*].walls`, keeps the entries with
+ * `isExterior: false` (interior partitions only — exteriors are the unit
+ * envelope, already emitted by `buildWallSet`), and dedupes by the stable
+ * RoomWall.id so each shared edge becomes a single WallNode.
+ *
+ * Returns the WallNodes in insertion order; the caller wires them to the
+ * level. Pure; no scene access.
+ */
+function emitRoomPartitions(
+  floor: FloorPlan,
+  plan: BuildingPlan,
+  ctx: EmitContext,
+): WallNode[] {
+  const out: WallNode[] = []
+  const seen = new Set<string>()
+  const wallHeight = plan.floorHeight
+  for (const unit of floor.units) {
+    // Test fixtures predating Phase 3-7 omit `rooms` — defend against
+    // them so the emitter stays useful in narrow unit tests that don't
+    // round-trip through `attachRoomsToUnits`.
+    for (const room of unit.rooms ?? []) {
+      for (const w of room.walls ?? []) {
+        if (w.isExterior) continue
+        if (seen.has(w.id)) continue
+        seen.add(w.id)
+        const id = generateId('wall')
+        const node: WallNode = {
+          object: 'node',
+          id,
+          type: 'wall',
+          parentId: null, // set by createNodesAction
+          visible: true,
+          start: [w.from[0], w.from[1]],
+          end: [w.to[0], w.to[1]],
+          thickness: DEFAULT_PARTITION_THICKNESS_M,
+          height: wallHeight,
+          children: [],
+          // Both sides face habitable rooms inside the unit. Renderer-
+          // agnostic; the IFC writer turns this into IfcWallStandardCase
+          // sides. 'interior' is the schema enum value for "no facade
+          // treatment, no party-wall fire rating bump".
+          frontSide: 'interior',
+          backSide: 'interior',
+          metadata: { bimai: { wallRole: 'room-partition' } },
+        } as unknown as WallNode
+        out.push(tagAsGenerated(node, ctx.generationId) as WallNode)
+      }
+    }
+  }
+  return out
 }
 
 /** Recover corridor width perpendicular to the long axis from the polygon. */

@@ -12,7 +12,7 @@ import { applyBIMDefaults } from './bim-defaults'
 
 function wallOp(
   id: string,
-  role: 'perimeter' | 'corridor' | 'party' | undefined,
+  role: 'perimeter' | 'corridor' | 'party' | 'room-partition' | undefined,
 ): NodeOp {
   const node = {
     object: 'node',
@@ -65,6 +65,14 @@ describe('applyBIMDefaults', () => {
     const [out] = applyBIMDefaults([wallOp('w3', 'party')])
     const bim = bimOf(out!)
     expect(bim?.material).toBe(BIMAI_MATERIALS['drywall-residential'].id)
+    expect(bim?.loadBearing).toBe(false)
+  })
+
+  it('stamps drywall on room-partition walls (Phase 3-7 interior subdivision)', () => {
+    const [out] = applyBIMDefaults([wallOp('w-rp', 'room-partition')])
+    const bim = bimOf(out!)
+    expect(bim?.material).toBe(BIMAI_MATERIALS['drywall-residential'].id)
+    expect(bim?.fireRating).toBe('A2')
     expect(bim?.loadBearing).toBe(false)
   })
 

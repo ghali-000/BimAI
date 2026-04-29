@@ -239,12 +239,18 @@ describe('bisectUnit (success cases)', () => {
     expect(living.windowAccess).toBe(true)
   })
 
-  it('emits empty walls and doors arrays (Tasks 5/8 fill them)', () => {
+  it('populates walls (Task 5) and leaves doors empty (Task 8 still pending)', () => {
     const r = bisectUnit(makeUnit(), getUnitTemplate('2BR')!)
     expectOk(r)
     for (const rm of r.rooms) {
-      expect(rm.walls).toEqual([])
+      // Every rectangular room contributes 4 boundary segments.
+      expect(rm.walls).toHaveLength(4)
       expect(rm.doors).toEqual([])
+      // At least one boundary touches the unit envelope (isExterior=true)
+      // and at least one is a shared interior partition (isExterior=false).
+      // For a 6-room 2BR every leaf has at least one of each.
+      expect(rm.walls.some((w) => w.isExterior)).toBe(true)
+      expect(rm.walls.some((w) => !w.isExterior)).toBe(true)
     }
   })
 })

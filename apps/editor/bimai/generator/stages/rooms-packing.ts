@@ -45,6 +45,7 @@ import {
   type UnitTemplate,
   type UnitTemplateConstraints,
 } from './rooms-templates'
+import { buildRoomWalls, unitSeedFor } from './rooms-walls'
 
 // ─────────────────────────────────────────────────────────────────────
 // Geometry primitives
@@ -398,9 +399,22 @@ export function bisectUnit(unit: UnitPlan, template: UnitTemplate): BisectResult
     kind: l.kind,
     polygon: transformRectToWorld(l.rect, obb),
     area: l.rect.w * l.rect.h,
-    walls: [], // Task 5 emits room-partition walls
+    walls: [], // populated below once all polygons are known
     doors: [], // Task 8 places doors
     windowAccess: rectTouchesFacade(l.rect, obb, facade),
   }))
+
+  // Phase 3-7 Task 5: derive partition-wall ownership. Each room carries
+  // every boundary segment with a stable shared id; segments shared
+  // between two rooms (count ≥ 2) are interior partitions to be emitted
+  // as new WallNodes, segments touching the unit envelope (count = 1)
+  // are flagged `isExterior: true` and reference the unit-packer's
+  // existing perimeter walls implicitly.
+  const seed = unitSeedFor(unit.type, unit.polygon)
+  const { perRoom } = buildRoomWalls(rooms, seed)
+  for (let i = 0; i < rooms.length; i++) {
+    rooms[i]!.walls = perRoom[i]!
+  }
+
   return { ok: true, rooms }
 }

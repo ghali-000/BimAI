@@ -13,15 +13,25 @@
 // test it against synthetic ops without spinning up the full pipeline.
 //
 // Wall classification reads the `wallRole` BimAI tagged onto each wall
-// during emit (`'perimeter' | 'corridor' | 'party'`). The mapping:
+// during emit (`'perimeter' | 'corridor' | 'party' | 'room-partition'`).
+// The mapping:
 //
-//   perimeter → exterior + load-bearing → brick-exterior  (catalog A1)
-//   corridor  → interior + non-load-bearing → drywall-residential
-//   party     → interior + non-load-bearing → drywall-residential
+//   perimeter      → exterior + load-bearing → brick-exterior  (catalog A1)
+//   corridor       → interior + non-load-bearing → drywall-residential
+//   party          → interior + non-load-bearing → drywall-residential
+//   room-partition → interior + non-load-bearing → drywall-residential
 //
 // Party walls are conservatively non-load-bearing today; in real
 // residential they often are, but the structural model isn't there yet.
 // Revisit with the structural pass in Phase 3-5+.
+//
+// `room-partition` (Phase 3-7) is a new bucket carrying the same physical
+// material as `corridor`/`party` (interior drywall) — it's surfaced as a
+// distinct role purely so cost/schedule/IFC consumers can break out the
+// "inside-a-unit subdivision" walls separately if they want. The cost
+// classifier in `cost/compute.ts` already routes interior + non-load-bearing
+// to the `interior` bucket via material+loadBearing, so no classifier change
+// is needed here — the role is informational on the BIM-defaults side.
 //
 // Levels and zones are skipped on purpose — they don't carry physical
 // material in the BimAI cost / schedule model.
@@ -43,20 +53,29 @@ interface WallContext {
   isLoadBearing: boolean
 }
 
-function readWallRole(node: AnyNode): 'perimeter' | 'corridor' | 'party' | undefined {
+type WallRole = 'perimeter' | 'corridor' | 'party' | 'room-partition'
+
+function readWallRole(node: AnyNode): WallRole | undefined {
   const meta = (node.metadata ?? {}) as Record<string, unknown>
   const bimai = meta.bimai
   if (typeof bimai !== 'object' || bimai === null) return undefined
   const role = (bimai as Record<string, unknown>).wallRole
-  if (role === 'perimeter' || role === 'corridor' || role === 'party') return role
+  if (
+    role === 'perimeter' ||
+    role === 'corridor' ||
+    role === 'party' ||
+    role === 'room-partition'
+  ) {
+    return role
+  }
   return undefined
 }
 
-function wallContextFromRole(
-  role: 'perimeter' | 'corridor' | 'party' | undefined,
-): WallContext {
+function wallContextFromRole(role: WallRole | undefined): WallContext {
   if (role === 'perimeter') return { isExterior: true, isLoadBearing: true }
-  // corridor, party, or unknown all default to interior non-load-bearing.
+  // corridor, party, room-partition, or unknown all default to interior
+  // non-load-bearing. Listed explicitly so adding a future load-bearing role
+  // is a one-line change here rather than a silent fall-through.
   return { isExterior: false, isLoadBearing: false }
 }
 

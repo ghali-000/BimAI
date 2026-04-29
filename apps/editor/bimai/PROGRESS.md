@@ -1,5 +1,13 @@
 # BimAI Progress
 
+## Phase 3-7 — Sub-rooms within Units (in progress)
+
+### Tasks 1-5 landed (Task 5 — Wall emission for room boundaries)
+
+- **`metadata.bimai.wallRole` extended with a fourth value: `'room-partition'`** (Phase 3-7 interior subdivisions). `bim-defaults.ts` maps it to drywall + non-load-bearing alongside `corridor` / `party`; the cost classifier in `cost/compute.ts` already routes interior + non-load-bearing walls to the `interior` wall bucket via material + loadBearing (not via wallRole), so room-partition walls drop into the existing interior bucket without classifier changes.
+- **Stable partition-wall ids** derived per shared edge in `generator/stages/rooms-walls.ts`: canonicalise the edge (snap to 0.1 mm, sort endpoints lex-min), hash with `cyrb128Hex` under a per-unit seed (unit type + lex-min vertex), keep the first 12 hex chars. Same input ⇒ same id, across runs and across the two RoomPlans that share the edge.
+- **Edge-sharing dedup**: every room records all 4 boundary segments with `isExterior: count === 1`. Segments shared by ≥ 2 rooms are interior partitions (emitted as new WallNodes); solo segments coincide with the unit envelope (already emitted by the unit packer). emit.ts walks `floor.units[*].rooms[*].walls` and materialises one WallNode per unique partition id, thickness 0.1 m, `frontSide`/`backSide: 'interior'`.
+
 ## Phase 3-6 — Compliance, cleanup, and IFC export (complete)
 
 ### What works (verified in the running app)
