@@ -1,7 +1,9 @@
 import type { AnyNodeId } from '@pascal-app/core'
 import { describe, expect, it } from 'vitest'
 import { calculatePolygonArea } from '../lib/geometry'
+import { roomColor } from '../lib/unit-colors'
 import { placeCorridor } from './stages/corridor'
+import { attachRoomsToUnits } from './stages/rooms'
 import { packUnits } from './stages/units'
 import {
   DEFAULT_DOOR_HEIGHT_M,
@@ -346,4 +348,307 @@ describe('emitBuildingPlan', () => {
       expect(x).toBeLessThanOrEqual(len)
     }
   })
+})
+
+// ─────────────────────────────────────────────────────────────────────
+// Phase 3-7 Task 6 — Room zone emission
+// ─────────────────────────────────────────────────────────────────────
+
+interface ZoneShape {
+  id: string
+  type: 'zone'
+  name: string
+  parentId: string | null
+  polygon: [number, number][]
+  color: string
+  metadata?: { bimai?: Record<string, unknown> }
+}
+
+function buildRoomyFloorPlan(): BuildingPlan {
+  // Same fixture as buildSingleFloorPlan, but the units are run through
+  // attachRoomsToUnits so each one carries a populated `rooms` array.
+  // packUnits's default 4×2BR-on-30×10 produces 4 corner-eligible 2BR
+  // candidates; without the corner-tower facade fixture they fall back to
+  // unit-shell, so rooms.length === 1 per unit. That's enough to exercise
+  // the emitter in this test — for richer (multi-room) coverage we use
+  // the synthetic fixture below.
+  const corridor = placeCorridor(OUTLINE_30x10)
+  if (!corridor) throw new Error('test setup: corridor placement failed')
+  const packed = packUnits({
+    outline: OUTLINE_30x10,
+    corridor,
+    corridorWidth: 1.5,
+    unitMix: [{ type: '2BR', count: 4, targetArea: STRIP_DEPTH * 10 }],
+  })
+  if (!packed) throw new Error('test setup: pack failed')
+  const { units } = attachRoomsToUnits(packed.units)
+  const floor: FloorPlan = {
+    level: 0,
+    outline: OUTLINE_30x10,
+    corridor,
+    units,
+  }
+  return {
+    generationId: GEN_ID,
+    footprint: OUTLINE_30x10,
+    floorCount: 1,
+    floorHeight: 3,
+    floors: [floor],
+    warnings: [],
+    params: DEFAULT_PARAMS,
+  }
+}
+
+/** Synthetic single-floor plan with one fully-subdivided 2BR unit
+ *  (corner-tower facade), guaranteeing 6 rooms for emitter coverage. */
+function buildMultiRoomFloorPlan(): BuildingPlan {
+  const polygon: [number, number][] = [
+    [0, 0],
+    [11, 0],
+    [11, 7.5],
+    [0, 7.5],
+  ]
+  const { units } = attachRoomsToUnits([
+    {
+      type: '2BR',
+      polygon,
+      area: 82.5,
+      facadeEdges: [0, 2],
+      corridorEdges: [],
+      rooms: [],
+    },
+  ])
+  const corridor = placeCorridor(OUTLINE_30x10)
+  if (!corridor) throw new Error('test setup: corridor placement failed')
+  const floor: FloorPlan = {
+    level: 0,
+    outline: OUTLINE_30x10,
+    corridor,
+    units,
+  }
+  return {
+    generationId: GEN_ID,
+    footprint: OUTLINE_30x10,
+    floorCount: 1,
+    floorHeight: 3,
+    floors: [floor],
+    warnings: [],
+    params: DEFAULT_PARAMS,
+  }
+}
+
+describe('emitBuildingPlan — room zones (Phase 3-7 Task 6)', () => {
+  it('emits one ZoneNode per RoomPlan plus the unit zone (multi-room 2BR)', () => {
+    const plan = buildMultiRoomFloorPlan()
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const zones = ops
+      .map((o) => o.node as unknown as ZoneShape)
+      .filter((n) => n.type === 'zone')
+    // 1 unit zone + 6 room zones (bedroom×2, bathroom, kitchen, living, hallway).
+    expect(zones).toHaveLength(7)
+  })
+
+  it('marks every room zone with the correct roomKind / unitId / unitType', () => {
+    const plan = buildMultiRoomFloorPlan()
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const zones = ops
+      .map((o) => o.node as unknown as ZoneShape)
+      .filter((n) => n.type === 'zone')
+    const unitZone = zones.find(
+      (z) => (z.metadata?.bimai as { unitType?: string })?.unitType === '2BR' &&
+        (z.metadata?.bimai as { roomKind?: string })?.roomKind === undefined,
+    )!
+    expect(unitZone).toBeDefined()
+    const roomZones = zones.filter(
+      (z) => (z.metadata?.bimai as { roomKind?: string })?.roomKind !== undefined,
+    )
+    expect(roomZones).toHaveLength(6)
+    for (const z of roomZones) {
+      const bimai = z.metadata!.bimai as {
+        roomKind: string
+        unitId: string
+        unitType: string
+        roomArea: number
+        windowAccess: boolean
+      }
+      expect(bimai.unitId).toBe(unitZone.id)
+      expect(bimai.unitType).toBe('2BR')
+      expect(['bedroom', 'bathroom', 'kitchen', 'living', 'hallway']).toContain(
+        bimai.roomKind,
+      )
+      expect(bimai.roomArea).toBeGreaterThan(0)
+      expect(typeof bimai.windowAccess).toBe('boolean')
+    }
+  })
+
+  it('paints every room zone with the documented roomColor for its kind', () => {
+    const plan = buildMultiRoomFloorPlan()
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const roomZones = ops
+      .map((o) => o.node as unknown as ZoneShape)
+      .filter(
+        (n) =>
+          n.type === 'zone' &&
+          (n.metadata?.bimai as { roomKind?: string })?.roomKind !== undefined,
+      )
+    for (const z of roomZones) {
+      const kind = (z.metadata!.bimai as { roomKind: string }).roomKind
+      expect(z.color).toBe(roomColor(kind))
+    }
+  })
+
+  it('parents every room zone to the level (sibling of the unit zone)', () => {
+    const plan = buildMultiRoomFloorPlan()
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const levelOp = ops.find((o) => o.node.type === 'level')!
+    const roomZoneOps = ops.filter((o) => {
+      const meta = o.node.metadata as { bimai?: { roomKind?: string } }
+      return o.node.type === 'zone' && meta?.bimai?.roomKind !== undefined
+    })
+    expect(roomZoneOps.length).toBeGreaterThan(0)
+    for (const op of roomZoneOps) {
+      expect(op.parentId).toBe(levelOp.node.id)
+    }
+  })
+
+  it('emits the unit zone before its room zones (parent-before-child order)', () => {
+    const plan = buildMultiRoomFloorPlan()
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const unitZoneIdx = ops.findIndex(
+      (o) =>
+        o.node.type === 'zone' &&
+        (o.node.metadata as { bimai?: { roomKind?: string; unitType?: string } })
+          ?.bimai?.roomKind === undefined,
+    )
+    const roomZoneIdxs = ops
+      .map((o, i) => {
+        const meta = o.node.metadata as { bimai?: { roomKind?: string } }
+        return o.node.type === 'zone' && meta?.bimai?.roomKind !== undefined
+          ? i
+          : -1
+      })
+      .filter((i) => i >= 0)
+    for (const i of roomZoneIdxs) expect(i).toBeGreaterThan(unitZoneIdx)
+  })
+
+  it('falls back to the unit-shell room when subdivision fails (one zone, kind=unit-shell)', () => {
+    // Unknown unit type → no template → unit-shell. Room zone count = 1
+    // per unit; roomKind = 'unit-shell'.
+    const corridor = placeCorridor(OUTLINE_30x10)!
+    const polygon: [number, number][] = [
+      [0, 0],
+      [5, 0],
+      [5, 4],
+      [0, 4],
+    ]
+    const { units } = attachRoomsToUnits([
+      {
+        type: 'made-up-type',
+        polygon,
+        area: 20,
+        facadeEdges: [2],
+        corridorEdges: [0],
+        rooms: [],
+      },
+    ])
+    const plan: BuildingPlan = {
+      generationId: GEN_ID,
+      footprint: OUTLINE_30x10,
+      floorCount: 1,
+      floorHeight: 3,
+      floors: [
+        { level: 0, outline: OUTLINE_30x10, corridor, units },
+      ],
+      warnings: [],
+      params: DEFAULT_PARAMS,
+    }
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const roomZones = ops.filter((o) => {
+      const meta = o.node.metadata as { bimai?: { roomKind?: string } }
+      return o.node.type === 'zone' && meta?.bimai?.roomKind !== undefined
+    })
+    expect(roomZones).toHaveLength(1)
+    expect(
+      (roomZones[0]!.node.metadata as { bimai: { roomKind: string } }).bimai
+        .roomKind,
+    ).toBe('unit-shell')
+  })
+
+  it('emits no extra zones for the pre-3-7 fixture (units without rooms)', () => {
+    // Backward-compat smoke test: the original fixture has units with
+    // rooms === [] (default UnitPlan shape). emitRoomZones should produce
+    // 0 ops for those units; total zone count = unit zone count.
+    const ops = emitBuildingPlan(buildSingleFloorPlan(), {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const zones = ops.filter((o) => o.node.type === 'zone')
+    const roomZones = zones.filter((o) => {
+      const meta = o.node.metadata as { bimai?: { roomKind?: string } }
+      return meta?.bimai?.roomKind !== undefined
+    })
+    expect(roomZones).toHaveLength(0)
+  })
+
+  it('uses the room polygon (not the unit polygon) for each room zone', () => {
+    const plan = buildMultiRoomFloorPlan()
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const unit = plan.floors[0]!.units[0]!
+    const roomZones = ops
+      .map((o) => o.node as unknown as ZoneShape)
+      .filter(
+        (n) =>
+          n.type === 'zone' &&
+          (n.metadata?.bimai as { roomKind?: string })?.roomKind !== undefined,
+      )
+    const totalZoneArea = roomZones.reduce(
+      (s, z) => s + calculatePolygonArea(z.polygon),
+      0,
+    )
+    // Room zones tile the unit; their polygon areas should sum to the unit area.
+    expect(totalZoneArea).toBeCloseTo(unit.area, 3)
+    // And every individual zone's polygon has 4 vertices (rectangular leaves).
+    for (const z of roomZones) expect(z.polygon).toHaveLength(4)
+  })
+
+  it('attaches generationId / generatedBy via tagAsGenerated on every room zone', () => {
+    const plan = buildMultiRoomFloorPlan()
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const roomZoneOps = ops.filter((o) => {
+      const meta = o.node.metadata as { bimai?: { roomKind?: string } }
+      return o.node.type === 'zone' && meta?.bimai?.roomKind !== undefined
+    })
+    expect(roomZoneOps.length).toBeGreaterThan(0)
+    for (const op of roomZoneOps) {
+      expect(isGenerated(op.node, GEN_ID)).toBe(true)
+    }
+  })
+
+  // Touch the helper so its signature stays stable when we extend it for
+  // other tests (e.g. multi-floor plans in Task 10).
+  void buildRoomyFloorPlan
 })

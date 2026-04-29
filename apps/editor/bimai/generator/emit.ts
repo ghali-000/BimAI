@@ -27,7 +27,7 @@ import type {
   ZoneNode,
 } from '@pascal-app/core'
 import type { Polygon2D, Point2D } from '../lib/envelope'
-import { unitColor } from '../lib/unit-colors'
+import { roomColor, unitColor } from '../lib/unit-colors'
 import { generateId } from './ids'
 import { asRectangle } from './stages/corridor'
 import { tagAsGenerated } from './tag'
@@ -107,9 +107,17 @@ function emitFloor(
     ops.push({ node: partition, parentId: levelId })
   }
 
-  // Zones (one per unit).
+  // Zones (one per unit, plus one per room within each unit).
   for (const unit of floor.units) {
-    ops.push(emitUnitZone(levelId, unit, ctx))
+    const unitZoneOp = emitUnitZone(levelId, unit, ctx)
+    ops.push(unitZoneOp)
+    // Phase 3-7 Task 6: emit a ZoneNode per RoomPlan, sibling of the
+    // unit zone but linked to it via `metadata.bimai.unitId`. Test
+    // fixtures predating 3-7 have `unit.rooms === undefined`, so the
+    // `?? []` keeps them green.
+    for (const op of emitRoomZones(levelId, unit, unitZoneOp.node.id, ctx)) {
+      ops.push(op)
+    }
   }
 
   // Openings (children of walls).
@@ -188,6 +196,69 @@ function emitUnitZone(
   } as unknown as ZoneNode
   // tagAsGenerated deep-merges, so unitType / targetArea survive.
   return { node: tagAsGenerated(node, ctx.generationId), parentId: levelId }
+}
+
+/**
+ * Emit one ZoneNode per RoomPlan inside a unit (Phase 3-7 Task 6).
+ *
+ * The room zone is a sibling of the unit zone, both children of the level.
+ * The relationship to the parent unit is captured in
+ * `metadata.bimai.unitId` (the unit ZoneNode's id) — keeping the tree flat
+ * matches the "all generated nodes are children of the level" pattern used
+ * elsewhere in this emitter and avoids any zone-nesting edge cases the
+ * scene-tree UI may not handle yet.
+ *
+ * Metadata vocabulary (`metadata.bimai`):
+ *   - roomKind     RoomKind the room was classified as. Drives material /
+ *                  IFC LongName / schedule grouping downstream.
+ *   - unitId       Pascal nanoid of the parent unit zone. Lets the IFC
+ *                  writer (Task 9) and the schedule layer reconstruct
+ *                  "rooms ⊂ unit" without re-running the packer.
+ *   - unitType     Cached for read-only consumers that want to filter by
+ *                  unit type without resolving `unitId` first.
+ *   - roomArea     Pre-computed m². Same source-of-truth note as
+ *                  `targetArea` on the unit zone — recomputing from polygon
+ *                  is fine, this is just a perf shortcut.
+ *   - windowAccess Whether the room touches a facade. Read by the IFC
+ *                  writer's IfcSpace `IsExternal` flag and by the schedule
+ *                  layer's "habitable rooms" count.
+ *
+ * Returns an empty array for units with no rooms (pre-3-7 test fixtures).
+ */
+function emitRoomZones(
+  levelId: AnyNodeId,
+  unit: UnitPlan,
+  unitId: AnyNodeId,
+  ctx: EmitContext,
+): NodeOp[] {
+  const ops: NodeOp[] = []
+  for (const room of unit.rooms ?? []) {
+    const id = generateId('zone')
+    const node: ZoneNode = {
+      object: 'node',
+      id,
+      type: 'zone',
+      name: `${unit.type} · ${room.kind}`,
+      parentId: levelId,
+      visible: true,
+      polygon: room.polygon.map((p) => [p[0], p[1]] as [number, number]),
+      color: roomColor(room.kind),
+      metadata: {
+        bimai: {
+          roomKind: room.kind,
+          unitId,
+          unitType: unit.type,
+          roomArea: room.area,
+          windowAccess: room.windowAccess,
+        },
+      },
+    } as unknown as ZoneNode
+    ops.push({
+      node: tagAsGenerated(node, ctx.generationId),
+      parentId: levelId,
+    })
+  }
+  return ops
 }
 
 // ── Walls ────────────────────────────────────────────────────────────────────

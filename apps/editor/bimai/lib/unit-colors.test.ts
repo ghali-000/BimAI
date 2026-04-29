@@ -7,7 +7,7 @@
 // snapshot-style assertions on the exact HSL strings.
 
 import { describe, expect, it } from 'vitest'
-import { unitColor, unitHue } from './unit-colors'
+import { roomColor, unitColor, unitHue } from './unit-colors'
 
 describe('unitColor — regression against previous inlined formula', () => {
   it('emits stable hsl strings for the canonical unit types', () => {
@@ -33,6 +33,31 @@ describe('unitColor — regression against previous inlined formula', () => {
     // 6 inputs → expect 6 distinct outputs (collisions across the 360-hue
     // space for short strings are highly improbable).
     expect(seen.size).toBe(6)
+  })
+})
+
+describe('roomColor — Phase 3-7 room-zone palette', () => {
+  it('returns a stable hsl string for every documented RoomKind', () => {
+    // Pinned values — changing any of these silently shifts the visual
+    // identity of every generated room zone in saved scenes.
+    expect(roomColor('bedroom')).toBe('hsl(220, 55%, 78%)')
+    expect(roomColor('bathroom')).toBe('hsl(190, 50%, 75%)')
+    expect(roomColor('kitchen')).toBe('hsl(30, 60%, 78%)')
+    expect(roomColor('living')).toBe('hsl(50, 60%, 80%)')
+    expect(roomColor('hallway')).toBe('hsl(0, 0%, 85%)')
+    expect(roomColor('unit-shell')).toBe('hsl(0, 0%, 80%)')
+  })
+
+  it('falls back to a neutral grey for unknown kinds', () => {
+    expect(roomColor('made-up-kind')).toBe('hsl(0, 0%, 75%)')
+  })
+
+  it('produces visually distinct colours across the documented palette', () => {
+    const colors = new Set(
+      ['bedroom', 'bathroom', 'kitchen', 'living', 'hallway', 'unit-shell']
+        .map(roomColor),
+    )
+    expect(colors.size).toBe(6)
   })
 })
 

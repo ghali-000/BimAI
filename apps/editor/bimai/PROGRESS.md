@@ -2,6 +2,10 @@
 
 ## Phase 3-7 — Sub-rooms within Units (in progress)
 
+### Tasks 1-6 landed
+
+- **Task 6 — Room zone emission.** Each `RoomPlan` materialises as its own `ZoneNode`, sibling of the unit zone (both children of the level), polygon = the room's leaf rectangle. Metadata vocabulary on `metadata.bimai`: `roomKind` (RoomKind), `unitId` (parent unit zone's nanoid — flat tree, semantic relationship lives in metadata), `unitType` (cached for direct query), `roomArea`, `windowAccess`. Names render as `${unitType} · ${roomKind}` so the scene tree reads cleanly. New `roomColor()` palette (cool blue bedrooms, teal bathrooms, warm kitchens, pale-yellow living, neutral hallways/shells) lives alongside `unitColor` in `lib/unit-colors.ts` so a 2D plan view added later imports from the same source. Backward-compat: pre-3-7 fixtures with `unit.rooms === undefined` (or `[]`) emit zero room zones — defended by `?? []` rather than a type-tightening that would cascade through the test suite.
+
 ### Tasks 1-5 landed (Task 5 — Wall emission for room boundaries)
 
 - **`metadata.bimai.wallRole` extended with a fourth value: `'room-partition'`** (Phase 3-7 interior subdivisions). `bim-defaults.ts` maps it to drywall + non-load-bearing alongside `corridor` / `party`; the cost classifier in `cost/compute.ts` already routes interior + non-load-bearing walls to the `interior` wall bucket via material + loadBearing (not via wallRole), so room-partition walls drop into the existing interior bucket without classifier changes.
