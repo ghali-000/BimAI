@@ -1,23 +1,27 @@
 // Rooms stage.
 //
-// Phase 3-7 introduces real interior subdivision (bedrooms, bathrooms,
-// kitchens, living rooms, hallways). The full subdivision algorithm lives
-// in `rooms-packing.ts` (Task 4) and is driven by templates from
-// `rooms-templates.ts` (Tasks 2-3). This file is the integration seam:
-// `attachRoomsToUnits` is the entry point the pipeline calls after the
+// Phase 3-7 entry point for unit subdivision. The actual algorithm
+// (recursive bisection of the unit's OBB) lives in `rooms-packing.ts`;
+// templates live in `rooms-templates.ts`. This file is the integration
+// seam: `attachRoomsToUnits` is what the pipeline calls after the
 // units packer runs.
 //
-// Until the templates + packer land (Tasks 2-5), `planRooms` returns a
-// degenerate single-room layout — one `unit-shell` room covering the
-// entire unit polygon, no interior walls, no interior doors. This matches
-// the Phase 3-3 stub semantics under the new (Phase 3-7) RoomPlan shape:
-// the data model evolves first, the algorithm fills in next. Existing
-// fixtures and the integration pipeline keep passing because a
-// `unit-shell` room is a valid (if uninteresting) RoomPlan.
+// Behaviour per unit:
+//   1. Look up the template for `unit.type`. No template → fall back
+//      to a single `unit-shell` room.
+//   2. Run `bisectUnit`. Success → use those rooms. Failure (rooms
+//      too small, bedroom misses facade, etc.) → fall back to
+//      `unit-shell` and accumulate a warning string for the panel
+//      summary.
 //
-// Intentionally pure and dependency-free.
+// The unit-shell fallback is also used as the Phase 3-3 stub
+// interpretation under the new RoomPlan shape — a single room
+// covering the unit polygon, no interior walls or doors. Tests still
+// exercise it directly via `unitShellLayout`.
 
 import type { RoomKind, RoomPlan, UnitPlan } from '../types'
+import { bisectUnit } from './rooms-packing'
+import { getUnitTemplate } from './rooms-templates'
 
 /**
  * Room kind used for the degenerate "no subdivision" case. Exported so
@@ -28,36 +32,75 @@ import type { RoomKind, RoomPlan, UnitPlan } from '../types'
 export const UNIT_SHELL_KIND: RoomKind = 'unit-shell'
 
 /**
- * Returns the rooms inside a single unit. Phase 3-7 stub: emits one
- * `unit-shell` room covering the full unit polygon with no interior
- * walls or doors. The real subdivision lands in Task 4 once Gates 1-2
- * resolve the template format and packing algorithm; this stub keeps
- * the pipeline alive in the meantime.
- *
- * Returns a fresh array so callers can mutate freely.
+ * Build the degenerate single-room layout for a unit: one `unit-shell`
+ * room covering the full polygon, no interior walls or doors. Used as
+ * the fallback when no template matches the unit type or when bisection
+ * fails a constraint. Pure; returns a fresh array and defensively-copied
+ * polygon.
  */
-export function planRooms(unit: UnitPlan): RoomPlan[] {
+export function unitShellLayout(unit: UnitPlan): RoomPlan[] {
   return [
     {
       kind: UNIT_SHELL_KIND,
-      // Defensive copy so downstream mutations of the room polygon don't
-      // leak into the source unit.
       polygon: unit.polygon.map((p) => [p[0], p[1]] as [number, number]),
       area: unit.area,
-      // No interior walls / doors in the unit-shell case. Exterior walls
-      // are the unit's perimeter, but the unit-shell stub does not enumerate
-      // them — Phase 3-7's real subdivision will populate `walls` for
-      // subdivided units. Downstream emitters (cost, IFC) currently read
-      // walls only for partition counting; an empty list is correct.
       walls: [],
       doors: [],
-      // A unit-shell "room" has access to whatever facade the unit has.
       windowAccess: unit.facadeEdges.length > 0,
     },
   ]
 }
 
-/** Apply `planRooms` to every unit on a list, returning new units. Pure. */
-export function attachRoomsToUnits(units: UnitPlan[]): UnitPlan[] {
-  return units.map((u) => ({ ...u, rooms: planRooms(u) }))
+/**
+ * Returns the rooms inside a single unit. Tries the template-driven
+ * bisector first; falls back to `unitShellLayout` on any failure.
+ *
+ * The fallback path is silent here — `attachRoomsToUnits` is the
+ * level that reports warnings to the pipeline so the panel can show
+ * "N units could not be subdivided".
+ */
+export function planRooms(unit: UnitPlan): RoomPlan[] {
+  const template = getUnitTemplate(unit.type)
+  if (!template) return unitShellLayout(unit)
+  const result = bisectUnit(unit, template)
+  if (!result.ok) return unitShellLayout(unit)
+  return result.rooms
+}
+
+export interface AttachRoomsResult {
+  units: UnitPlan[]
+  warnings: string[]
+}
+
+/**
+ * Apply room subdivision to every unit on a list. Returns new units
+ * (input is never mutated) plus an array of warnings — one per unit
+ * that fell back to unit-shell because of a packer failure or because
+ * its type has no template.
+ *
+ * The warning strings are panel-ready: they include the unit type,
+ * the failing room kind (when applicable), and the failing dimension
+ * so a reviewer can decide whether to widen the unit, shrink the
+ * template, or accept the fallback.
+ */
+export function attachRoomsToUnits(units: UnitPlan[]): AttachRoomsResult {
+  const warnings: string[] = []
+  const out = units.map((u, i) => {
+    const template = getUnitTemplate(u.type)
+    if (!template) {
+      // No-template is silent: it's the expected path for unit types
+      // outside the registry (e.g. a future custom type the optimizer
+      // hasn't added a template for yet). The unit ships as a shell.
+      return { ...u, rooms: unitShellLayout(u) }
+    }
+    const result = bisectUnit(u, template)
+    if (!result.ok) {
+      warnings.push(
+        `unit ${i} (${u.type}): could not be subdivided — ${result.detail}`,
+      )
+      return { ...u, rooms: unitShellLayout(u) }
+    }
+    return { ...u, rooms: result.rooms }
+  })
+  return { units: out, warnings }
 }

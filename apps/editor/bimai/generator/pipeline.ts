@@ -141,11 +141,17 @@ export function buildPlan(
       warnings.push(...packed.warnings.map((w) => `floor ${i}: ${w}`))
     }
 
+    const roomsAttached = attachRoomsToUnits(packed.units)
+    if (roomsAttached.warnings.length > 0) {
+      warnings.push(
+        ...roomsAttached.warnings.map((w) => `floor ${i}: ${w}`),
+      )
+    }
     floors.push({
       level: i,
       outline: footprint.polygon,
       corridor,
-      units: attachRoomsToUnits(packed.units),
+      units: roomsAttached.units,
     })
   }
 
