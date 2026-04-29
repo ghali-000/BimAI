@@ -8,7 +8,9 @@ import {
   type ProportionalSlice,
   type SubdivideSpec,
   type UnitTemplate,
+  computeLeafAllocations,
   getUnitTemplate,
+  isAreaInBand,
   leafKinds,
   listUnitTemplates,
   validateTemplate,
@@ -172,6 +174,96 @@ describe('expected leaf-kind sets per unit type', () => {
   })
 })
 
+describe('area bands', () => {
+  it('every template declares a positive, ordered band', () => {
+    for (const t of listUnitTemplates()) {
+      expect(t.areaRangeM2.minM2).toBeGreaterThan(0)
+      expect(t.areaRangeM2.maxM2).toBeGreaterThan(t.areaRangeM2.minM2)
+    }
+  })
+
+  it('bands match the brief (Studio 35-45 ... 4BR 130-160)', () => {
+    expect(getUnitTemplate('Studio')!.areaRangeM2).toEqual({ minM2: 35, maxM2: 45 })
+    expect(getUnitTemplate('1BR')!.areaRangeM2).toEqual({ minM2: 50, maxM2: 65 })
+    expect(getUnitTemplate('2BR')!.areaRangeM2).toEqual({ minM2: 75, maxM2: 90 })
+    expect(getUnitTemplate('3BR')!.areaRangeM2).toEqual({ minM2: 100, maxM2: 120 })
+    expect(getUnitTemplate('4BR')!.areaRangeM2).toEqual({ minM2: 130, maxM2: 160 })
+  })
+
+  it('isAreaInBand: midpoint inside, endpoints inside, outside outside', () => {
+    const t = getUnitTemplate('2BR')!
+    expect(isAreaInBand(t, 82.5)).toBe(true)
+    expect(isAreaInBand(t, 75)).toBe(true)
+    expect(isAreaInBand(t, 90)).toBe(true)
+    expect(isAreaInBand(t, 74.9)).toBe(false)
+    expect(isAreaInBand(t, 90.1)).toBe(false)
+  })
+})
+
+describe('computeLeafAllocations', () => {
+  it('sums to the total area', () => {
+    for (const t of listUnitTemplates()) {
+      const mid = (t.areaRangeM2.minM2 + t.areaRangeM2.maxM2) / 2
+      const sum = computeLeafAllocations(t, mid).reduce(
+        (acc, l) => acc + l.areaM2,
+        0,
+      )
+      expect(sum).toBeCloseTo(mid, 6)
+    }
+  })
+
+  it('produces one entry per leaf in template order', () => {
+    const t = getUnitTemplate('2BR')!
+    const allocs = computeLeafAllocations(t, 82.5)
+    expect(allocs.map((a) => a.kind)).toEqual(leafKinds(t))
+  })
+
+  it('respects nested fractions (2BR mid-band sanity check)', () => {
+    // 2BR @ 82.5: hallway-strip 14% = 11.55 (hallway 60% = 6.93, bath 40% = 4.62);
+    // public 48% = 39.6 (kitchen 40% = 15.84, living 60% = 23.76);
+    // private 38% = 31.35 (bed-1 55% = 17.24, bed-2 45% = 14.11).
+    const allocs = computeLeafAllocations(getUnitTemplate('2BR')!, 82.5)
+    const byKind: Record<string, number[]> = {}
+    for (const a of allocs) (byKind[a.kind] ??= []).push(a.areaM2)
+    expect(byKind.hallway![0]).toBeCloseTo(82.5 * 0.14 * 0.6, 4)
+    expect(byKind.bathroom![0]).toBeCloseTo(82.5 * 0.14 * 0.4, 4)
+    expect(byKind.kitchen![0]).toBeCloseTo(82.5 * 0.48 * 0.4, 4)
+    expect(byKind.living![0]).toBeCloseTo(82.5 * 0.48 * 0.6, 4)
+    expect(byKind.bedroom!.sort((a, b) => b - a)).toEqual([
+      82.5 * 0.38 * 0.55,
+      82.5 * 0.38 * 0.45,
+    ])
+  })
+
+  it('hallway-embedded bathroom stays under the cap at mid-band for every template', () => {
+    // The hallway strip's bathroom (the smaller of the two, in 4BR)
+    // is the common case; it should never need clamping at mid-band.
+    for (const t of listUnitTemplates()) {
+      const mid = (t.areaRangeM2.minM2 + t.areaRangeM2.maxM2) / 2
+      const allocs = computeLeafAllocations(t, mid)
+      const baths = allocs.filter((a) => a.kind === 'bathroom')
+      if (baths.length === 0) continue // (no template currently has zero baths, but be defensive)
+      const smallestBath = baths.reduce((m, a) => (a.areaM2 < m.areaM2 ? a : m))
+      expect(smallestBath.areaM2).toBeLessThanOrEqual(BATHROOM_MAX_AREA_M2)
+    }
+  })
+
+  it('flags 4BR en-suite as the documented clamp case at upper mid-band', () => {
+    // Brief calls this out explicitly: "4BR template at the top of
+    // its band — bathroom slices clamp at bathroomMaxAreaM2 and
+    // surplus reallocates." At 145 m² mid-band the en-suite is
+    // 145 * 0.46 * 0.12 ≈ 8.004 m² — just over the 8 m² cap. This
+    // is the trigger the Task 4 packer's clamp-and-redistribute
+    // path needs to fire on; capturing it as a test guards against
+    // accidentally re-balancing the template into a no-clamp shape.
+    const allocs = computeLeafAllocations(getUnitTemplate('4BR')!, 145)
+    const overCap = allocs.filter(
+      (a) => a.kind === 'bathroom' && a.areaM2 > BATHROOM_MAX_AREA_M2,
+    )
+    expect(overCap.length).toBeGreaterThanOrEqual(1)
+  })
+})
+
 // validateTemplate guards against malformed templates landing in the
 // repo. We construct deliberately-bad templates here to confirm the
 // thrown errors point at the right path.
@@ -179,6 +271,7 @@ describe('validateTemplate', () => {
   function tpl(rootSplit: SubdivideSpec): UnitTemplate {
     return {
       unitType: 'TEST',
+      areaRangeM2: { minM2: 30, maxM2: 60 },
       rootSplit,
       constraints: {
         bedroomNeedsFacade: true,
@@ -281,6 +374,20 @@ describe('validateTemplate', () => {
         }),
       ),
     ).toThrow(/two-level depth cap/)
+  })
+
+  it('throws on inverted or zero areaRangeM2', () => {
+    const bad: UnitTemplate = {
+      unitType: 'TEST',
+      areaRangeM2: { minM2: 60, maxM2: 30 }, // inverted
+      rootSplit: { axis: 'along', slices: [{ fraction: 1.0, kind: 'living' }] },
+      constraints: {
+        bedroomNeedsFacade: true,
+        bathroomMaxAreaM2: BATHROOM_MAX_AREA_M2,
+        minRoomDimensionM: MIN_ROOM_DIMENSION_M,
+      },
+    }
+    expect(() => validateTemplate(bad)).toThrow(/areaRangeM2/)
   })
 
   it('throws on empty slices array', () => {

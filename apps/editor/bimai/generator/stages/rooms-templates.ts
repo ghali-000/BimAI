@@ -73,9 +73,24 @@ export interface UnitTemplateConstraints {
   minRoomDimensionM: number
 }
 
+/**
+ * Inclusive [min, max] area band the template was authored against.
+ * The Task 4 packer uses this to decide whether the unit's polygon is
+ * inside the template's design envelope; far outside → fall back to
+ * unit-shell rather than instantiate a layout that won't satisfy the
+ * minRoomDimensionM floor anyway. Bands are EU mid-rise residential
+ * conventions, not authoritative numbers.
+ */
+export interface AreaRangeM2 {
+  minM2: number
+  maxM2: number
+}
+
 export interface UnitTemplate {
   /** Matches `UnitMixEntry.type`: "Studio", "1BR", "2BR", "3BR", "4BR". */
   unitType: string
+  /** The polygon-area band this template was authored for. */
+  areaRangeM2: AreaRangeM2
   rootSplit: SubdivideSpec
   constraints: UnitTemplateConstraints
 }
@@ -114,6 +129,7 @@ const DEFAULT_CONSTRAINTS: UnitTemplateConstraints = {
 /** Studio (35-45 m²): bath strip + open living. No hallway at this size. */
 const STUDIO_TEMPLATE: UnitTemplate = {
   unitType: 'Studio',
+  areaRangeM2: { minM2: 35, maxM2: 45 },
   rootSplit: {
     axis: 'along',
     slices: [
@@ -137,6 +153,7 @@ const STUDIO_TEMPLATE: UnitTemplate = {
  */
 const ONE_BR_TEMPLATE: UnitTemplate = {
   unitType: '1BR',
+  areaRangeM2: { minM2: 50, maxM2: 65 },
   rootSplit: {
     axis: 'along',
     slices: [
@@ -173,6 +190,7 @@ const ONE_BR_TEMPLATE: UnitTemplate = {
  */
 const TWO_BR_TEMPLATE: UnitTemplate = {
   unitType: '2BR',
+  areaRangeM2: { minM2: 75, maxM2: 90 },
   rootSplit: {
     axis: 'along',
     slices: [
@@ -221,6 +239,7 @@ const TWO_BR_TEMPLATE: UnitTemplate = {
  */
 const THREE_BR_TEMPLATE: UnitTemplate = {
   unitType: '3BR',
+  areaRangeM2: { minM2: 100, maxM2: 120 },
   rootSplit: {
     axis: 'along',
     slices: [
@@ -267,6 +286,7 @@ const THREE_BR_TEMPLATE: UnitTemplate = {
  */
 const FOUR_BR_TEMPLATE: UnitTemplate = {
   unitType: '4BR',
+  areaRangeM2: { minM2: 130, maxM2: 160 },
   rootSplit: {
     axis: 'along',
     slices: [
@@ -392,7 +412,63 @@ function validateSpec(
  * deep inside the packer.
  */
 export function validateTemplate(t: UnitTemplate): void {
+  const { minM2, maxM2 } = t.areaRangeM2
+  if (!(minM2 > 0) || !(maxM2 > 0) || minM2 >= maxM2) {
+    throw new InvalidTemplateError(
+      `areaRangeM2 invalid: min=${minM2}, max=${maxM2}`,
+      t.unitType,
+      'areaRangeM2',
+    )
+  }
   validateSpec(t.rootSplit, t.unitType, 'rootSplit')
+}
+
+/**
+ * Distributes a total area through the template tree by multiplying
+ * fractions level-by-level. Returns one entry per leaf, in template
+ * traversal order. The Task 4 packer uses this to:
+ *  - sanity-check that no leaf falls below `minRoomDimensionM²`
+ *    before it bothers placing geometry,
+ *  - decide which slice absorbs surplus from a clamped bathroom
+ *    (the next sibling — see brief),
+ *  - drive the schedule layer's per-room area report.
+ *
+ * Pure: ignores actual polygon geometry; only multiplies fractions.
+ * The packer reconciles these expectations with the real rectangle
+ * dimensions when it bisects.
+ */
+export interface LeafAllocation {
+  kind: RoomKind
+  areaM2: number
+  /** Path through the template tree, e.g. "rootSplit.slices[1].subdivide.slices[0]". */
+  path: string
+}
+
+export function computeLeafAllocations(
+  template: UnitTemplate,
+  totalAreaM2: number,
+): LeafAllocation[] {
+  const out: LeafAllocation[] = []
+  const walk = (
+    spec: SubdivideSpec,
+    parentArea: number,
+    path: string,
+  ): void => {
+    spec.slices.forEach((slice, i) => {
+      const a = parentArea * slice.fraction
+      const p = `${path}.slices[${i}]`
+      if (slice.kind) out.push({ kind: slice.kind, areaM2: a, path: p })
+      else if (slice.subdivide) walk(slice.subdivide, a, `${p}.subdivide`)
+    })
+  }
+  walk(template.rootSplit, totalAreaM2, 'rootSplit')
+  return out
+}
+
+/** True if the polygon area is inside the template's authored band. */
+export function isAreaInBand(template: UnitTemplate, areaM2: number): boolean {
+  const { minM2, maxM2 } = template.areaRangeM2
+  return areaM2 >= minM2 && areaM2 <= maxM2
 }
 
 // ─────────────────────────────────────────────────────────────────────
