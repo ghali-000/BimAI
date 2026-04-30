@@ -90,16 +90,21 @@ export interface RoomWall {
 /**
  * Door connecting two rooms. `from` / `to` carry the room kinds (the
  * graph relationship the door encodes), `position` is a world-space
- * point on the shared partition wall.
+ * point on the shared partition wall, `wallId` references the host
+ * RoomWall by its stable canonical-edge id so the emitter can look up
+ * the corresponding emitted WallNode without floating-point coordinate
+ * matching.
  *
- * Doors are deduplicated by the rooms-packing stage so a single door
- * between bedroom and hallway appears once, owned by whichever room the
- * algorithm walks first. Downstream emitters don't need to deduplicate.
+ * Doors are deduplicated at planning time: a door between bedroom and
+ * hallway is owned by the non-hallway room (the destination), so each
+ * door appears exactly once across the unit's RoomPlan[]. Downstream
+ * emitters walk `room.doors` and trust the count.
  */
 export interface RoomDoor {
   from: RoomKind
   to: RoomKind
   position: [number, number]
+  wallId: string
 }
 
 export interface RoomPlan {

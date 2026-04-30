@@ -658,3 +658,216 @@ describe('emitBuildingPlan — room zones (Phase 3-7 Task 6)', () => {
   // other tests (e.g. multi-floor plans in Task 10).
   void buildRoomyFloorPlan
 })
+
+// ─────────────────────────────────────────────────────────────────────
+// Phase 3-7 Task 8 — room doors on partition walls
+// ─────────────────────────────────────────────────────────────────────
+
+interface DoorShape {
+  type: 'door'
+  id: string
+  parentId: string | null
+  wallId?: string
+  position: [number, number, number]
+  width: number
+  metadata?: { bimai?: Record<string, unknown> }
+}
+
+interface WallShape {
+  type: 'wall'
+  id: string
+  start: [number, number]
+  end: [number, number]
+  metadata?: { bimai?: { wallRole?: string } }
+}
+
+const EMIT_EPS = 1e-6
+
+describe('emitBuildingPlan — room doors (Phase 3-7 Task 8)', () => {
+  it('owners-only dedup: every internal door has from=hallway and lives on a partition wall', () => {
+    const plan = buildMultiRoomFloorPlan()
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const partitionWallIds = new Set(
+      ops
+        .map((o) => o.node as unknown as WallShape)
+        .filter(
+          (n) => n.type === 'wall' && n.metadata?.bimai?.wallRole === 'room-partition',
+        )
+        .map((n) => n.id),
+    )
+    const internalDoors = ops
+      .map((o) => o.node as unknown as DoorShape)
+      .filter(
+        (n) =>
+          n.type === 'door' &&
+          (n.metadata?.bimai as { fromRoomKind?: string })?.fromRoomKind !==
+            undefined,
+      )
+    expect(internalDoors.length).toBeGreaterThanOrEqual(1)
+    for (const d of internalDoors) {
+      const meta = d.metadata!.bimai as {
+        fromRoomKind: string
+        toRoomKind: string
+      }
+      expect(meta.fromRoomKind).toBe('hallway')
+      expect(meta.toRoomKind).not.toBe('hallway')
+      // Door is parented to a partition wall (not a perimeter / corridor wall).
+      expect(partitionWallIds.has(d.parentId!)).toBe(true)
+      expect(d.wallId).toBe(d.parentId)
+    }
+  })
+
+  it('unit-shell unit emits zero internal doors but still emits the front door', () => {
+    // The pre-3-7 single-floor fixture's units fall back to unit-shell —
+    // no partitions, so no room doors. The front door at the corridor
+    // edge midpoint is still emitted.
+    const ops = emitBuildingPlan(buildSingleFloorPlan(), {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const doors = ops.map((o) => o.node as unknown as DoorShape).filter(
+      (n) => n.type === 'door',
+    )
+    const internal = doors.filter(
+      (d) =>
+        (d.metadata?.bimai as { fromRoomKind?: string })?.fromRoomKind !==
+        undefined,
+    )
+    const frontDoors = doors.filter(
+      (d) =>
+        (d.metadata?.bimai as { fromRoomKind?: string })?.fromRoomKind ===
+        undefined,
+    )
+    expect(internal).toHaveLength(0)
+    // 4 units in OUTLINE_30x10 / 2BR mix ⇒ 4 front doors.
+    expect(frontDoors.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it('door positions land on the host partition wall (within EPSILON)', () => {
+    const plan = buildMultiRoomFloorPlan()
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const wallById = new Map<string, WallShape>()
+    for (const o of ops) {
+      const n = o.node as unknown as WallShape
+      if (n.type === 'wall') wallById.set(n.id, n)
+    }
+    const internalDoors = ops
+      .map((o) => o.node as unknown as DoorShape)
+      .filter(
+        (n) =>
+          n.type === 'door' &&
+          (n.metadata?.bimai as { fromRoomKind?: string })?.fromRoomKind !==
+            undefined,
+      )
+    expect(internalDoors.length).toBeGreaterThanOrEqual(1)
+    for (const d of internalDoors) {
+      const wall = wallById.get(d.parentId!)
+      expect(wall).toBeDefined()
+      const len = Math.hypot(
+        wall!.end[0] - wall!.start[0],
+        wall!.end[1] - wall!.start[1],
+      )
+      // Wall-local x is the door's first position component; must lie
+      // strictly within [0, len] (the emitter's clamp guarantees this).
+      const x = d.position[0]
+      expect(x).toBeGreaterThanOrEqual(-EMIT_EPS)
+      expect(x).toBeLessThanOrEqual(len + EMIT_EPS)
+    }
+  })
+
+  it('door parentId equals the wall id and door wallId mirrors it', () => {
+    const plan = buildMultiRoomFloorPlan()
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const internalDoors = ops
+      .map((o) => o.node as unknown as DoorShape)
+      .filter(
+        (n) =>
+          n.type === 'door' &&
+          (n.metadata?.bimai as { fromRoomKind?: string })?.fromRoomKind !==
+            undefined,
+      )
+    expect(internalDoors.length).toBeGreaterThanOrEqual(1)
+    for (const d of internalDoors) {
+      // parentId and wallId both point at the host partition. The IFC
+      // writer reads `wallId`; `parentId` is the scene-tree relationship.
+      // They must agree — emit.ts sets both off the same WallNode.
+      expect(d.wallId).toBe(d.parentId)
+    }
+  })
+
+  it('regen with the same plan produces identical door ids (deterministic)', () => {
+    const plan = buildMultiRoomFloorPlan()
+    const a = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const b = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const doorIdsA = a
+      .map((o) => o.node as unknown as DoorShape)
+      .filter(
+        (n) =>
+          n.type === 'door' &&
+          (n.metadata?.bimai as { fromRoomKind?: string })?.fromRoomKind !==
+            undefined,
+      )
+      .map((d) => d.id)
+      .sort()
+    const doorIdsB = b
+      .map((o) => o.node as unknown as DoorShape)
+      .filter(
+        (n) =>
+          n.type === 'door' &&
+          (n.metadata?.bimai as { fromRoomKind?: string })?.fromRoomKind !==
+            undefined,
+      )
+      .map((d) => d.id)
+      .sort()
+    expect(doorIdsA.length).toBeGreaterThanOrEqual(1)
+    expect(doorIdsA).toEqual(doorIdsB)
+    // The deterministic id format is `door_<12hex>` — derived from the
+    // partition wall hash slice, no `generateId('door')` randomness.
+    for (const id of doorIdsA) {
+      expect(id).toMatch(/^door_[0-9a-f]{12}$/)
+    }
+  })
+
+  it('front door + internal doors coexist for a multi-room unit', () => {
+    const plan = buildMultiRoomFloorPlan()
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const doors = ops.map((o) => o.node as unknown as DoorShape).filter(
+      (n) => n.type === 'door',
+    )
+    const internal = doors.filter(
+      (d) =>
+        (d.metadata?.bimai as { fromRoomKind?: string })?.fromRoomKind !==
+        undefined,
+    )
+    const frontDoors = doors.filter(
+      (d) =>
+        (d.metadata?.bimai as { fromRoomKind?: string })?.fromRoomKind ===
+        undefined,
+    )
+    // The single 2BR unit gets exactly one front door (corridor edge).
+    expect(frontDoors).toHaveLength(1)
+    // …and at least one internal door (the bathroom; further hallway-
+    // adjacent rooms depend on canonical-edge equality, see rooms-doors).
+    expect(internal.length).toBeGreaterThanOrEqual(1)
+    // All door widths use the default; emitter never resizes for doors.
+    for (const d of doors) expect(d.width).toBeCloseTo(DEFAULT_DOOR_WIDTH_M, 9)
+  })
+})

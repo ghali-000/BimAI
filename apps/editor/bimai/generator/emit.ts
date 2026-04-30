@@ -103,8 +103,12 @@ function emitFloor(
   // RoomWall.id assigned by `buildRoomWalls` so a single drywall between
   // bedroom and hallway materialises once. Drywall (interior, non-load-
   // bearing) — bim-defaults stamps the material from the wallRole tag.
-  for (const partition of emitRoomPartitions(floor, plan, ctx)) {
-    ops.push({ node: partition, parentId: levelId })
+  // The map is keyed by RoomWall.id so room doors (Task 8) can resolve
+  // their host wall without floating-point coordinate matching.
+  const partitionByRoomWallId = new Map<string, WallNode>()
+  for (const { node, roomWallId } of emitRoomPartitions(floor, plan, ctx)) {
+    ops.push({ node, parentId: levelId })
+    partitionByRoomWallId.set(roomWallId, node)
   }
 
   // Zones (one per unit, plus one per room within each unit).
@@ -124,6 +128,17 @@ function emitFloor(
   for (const unit of floor.units) {
     const opening = emitUnitOpenings(unit, floor, wallSet, plan, ctx)
     ops.push(...opening)
+  }
+
+  // Phase 3-7 Task 8: room doors on partition walls. Each non-hallway
+  // room with a hallway-adjacent partition has a single RoomDoor on its
+  // `doors[]`; we walk those and emit one DoorNode per entry parented
+  // to the partition WallNode emitted just above. Pre-3-7 fixtures with
+  // `unit.rooms === undefined` skip naturally.
+  for (const unit of floor.units) {
+    for (const op of emitRoomDoors(unit, partitionByRoomWallId, ctx)) {
+      ops.push(op)
+    }
   }
 
   return ops
@@ -410,8 +425,8 @@ function emitRoomPartitions(
   floor: FloorPlan,
   plan: BuildingPlan,
   ctx: EmitContext,
-): WallNode[] {
-  const out: WallNode[] = []
+): Array<{ node: WallNode; roomWallId: string }> {
+  const out: Array<{ node: WallNode; roomWallId: string }> = []
   const seen = new Set<string>()
   const wallHeight = plan.floorHeight
   for (const unit of floor.units) {
@@ -443,11 +458,56 @@ function emitRoomPartitions(
           backSide: 'interior',
           metadata: { bimai: { wallRole: 'room-partition' } },
         } as unknown as WallNode
-        out.push(tagAsGenerated(node, ctx.generationId) as WallNode)
+        out.push({
+          node: tagAsGenerated(node, ctx.generationId) as WallNode,
+          roomWallId: w.id,
+        })
       }
     }
   }
   return out
+}
+
+/**
+ * Phase 3-7 Task 8. Materialise the per-room `RoomDoor[]` into DoorNodes
+ * parented to the matching partition WallNode. Uses `partitionByRoomWallId`
+ * — built by the caller from the just-emitted partition walls — to
+ * resolve each `RoomDoor.wallId` (a stable canonical-edge hash) to the
+ * Pascal node id assigned to the WallNode.
+ *
+ * Determinism: door node IDs derive from the partition wall hash slice
+ * (`door_<12hex>`), not from `generateId('door')`. Same regen ⇒ same
+ * door ids, so persisted scenes don't drift between runs.
+ *
+ * Unit-shell units have no partition walls, so they have no room doors;
+ * this loop emits zero ops for them naturally — no special-case needed.
+ */
+function emitRoomDoors(
+  unit: UnitPlan,
+  partitionByRoomWallId: Map<string, WallNode>,
+  ctx: EmitContext,
+): NodeOp[] {
+  const ops: NodeOp[] = []
+  for (const room of unit.rooms ?? []) {
+    for (const door of room.doors ?? []) {
+      const wall = partitionByRoomWallId.get(door.wallId)
+      if (!wall) continue // partition wasn't emitted (e.g. exterior — shouldn't happen)
+      const op = emitDoorOnWall(wall, door.position, /* plan */ null, ctx, {
+        // Strip the `partition_` prefix and reuse the 12-hex slice as
+        // the door's id discriminator. Stable, collision-resistant for
+        // our scale (the partition hash is already cyrb128 of a
+        // canonical edge with unit-scoped seed).
+        id: `door_${door.wallId.replace(/^partition_/, '')}`,
+        // Preserve the room-pair semantics on the door's metadata —
+        // schedule and IFC writer can read this without rewalking the
+        // RoomPlan tree. emitDoorOnWall wraps these under
+        // `metadata.bimai`, so don't pre-wrap here.
+        metadata: { fromRoomKind: door.from, toRoomKind: door.to },
+      })
+      if (op) ops.push(op)
+    }
+  }
+  return ops
 }
 
 /** Recover corridor width perpendicular to the long axis from the polygon. */
@@ -559,11 +619,19 @@ function wallLength(wall: WallNode): number {
   return Math.hypot(wall.end[0] - wall.start[0], wall.end[1] - wall.start[1])
 }
 
+interface EmitDoorOverrides {
+  /** Override the auto-generated door id (e.g. for deterministic room doors). */
+  id?: string
+  /** Extra metadata to merge under `metadata.bimai`. */
+  metadata?: Record<string, unknown>
+}
+
 function emitDoorOnWall(
   wall: WallNode,
   worldPoint: Point2D,
-  _plan: BuildingPlan,
+  _plan: BuildingPlan | null,
   ctx: EmitContext,
+  overrides: EmitDoorOverrides = {},
 ): NodeOp | null {
   const x = wallLocalX(wall, worldPoint)
   const len = wallLength(wall)
@@ -572,7 +640,7 @@ function emitDoorOnWall(
   if (len < DEFAULT_DOOR_WIDTH_M + 2 * OPENING_CLEAR_MARGIN_M) return null
   const clamped = Math.max(halfW, Math.min(len - halfW, x))
 
-  const id = generateId('door')
+  const id = (overrides.id ?? generateId('door')) as DoorNode['id']
   const node: DoorNode = {
     object: 'node',
     id,
@@ -592,7 +660,7 @@ function emitDoorOnWall(
     rotation: [0, 0, 0],
     width: DEFAULT_DOOR_WIDTH_M,
     height: DEFAULT_DOOR_HEIGHT_M,
-    metadata: {},
+    metadata: overrides.metadata ? { bimai: overrides.metadata } : {},
   } as unknown as DoorNode
   return {
     node: tagAsGenerated(node, ctx.generationId),

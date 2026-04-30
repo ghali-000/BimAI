@@ -45,6 +45,7 @@ import {
   type UnitTemplate,
   type UnitTemplateConstraints,
 } from './rooms-templates'
+import { placeRoomDoors } from './rooms-doors'
 import { buildRoomWalls, unitSeedFor } from './rooms-walls'
 
 // ─────────────────────────────────────────────────────────────────────
@@ -415,6 +416,10 @@ export function bisectUnit(unit: UnitPlan, template: UnitTemplate): BisectResult
   for (let i = 0; i < rooms.length; i++) {
     rooms[i]!.walls = perRoom[i]!
   }
+
+  // Phase 3-7 Task 8: place doors on partition walls between hallway and
+  // non-hallway rooms. Mutates rooms[*].doors in-place.
+  placeRoomDoors(rooms)
 
   return { ok: true, rooms }
 }

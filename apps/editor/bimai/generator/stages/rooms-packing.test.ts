@@ -239,18 +239,40 @@ describe('bisectUnit (success cases)', () => {
     expect(living.windowAccess).toBe(true)
   })
 
-  it('populates walls (Task 5) and leaves doors empty (Task 8 still pending)', () => {
+  it('populates walls (Task 5) and doors (Task 8) for every room', () => {
     const r = bisectUnit(makeUnit(), getUnitTemplate('2BR')!)
     expectOk(r)
     for (const rm of r.rooms) {
       // Every rectangular room contributes 4 boundary segments.
       expect(rm.walls).toHaveLength(4)
-      expect(rm.doors).toEqual([])
       // At least one boundary touches the unit envelope (isExterior=true)
       // and at least one is a shared interior partition (isExterior=false).
       // For a 6-room 2BR every leaf has at least one of each.
       expect(rm.walls.some((w) => w.isExterior)).toBe(true)
       expect(rm.walls.some((w) => !w.isExterior)).toBe(true)
+    }
+    // Single-owner door dedup (Task 8): doors live on the non-hallway
+    // side only, so the hallway's `doors[]` is empty. At least one
+    // non-hallway room shares a hallway-adjacent partition (the
+    // bathroom, by the 2BR template) and owns its door. Rooms that
+    // only share *partial* edges with the hallway (kitchen / living /
+    // bedrooms in this template) get no door under the current
+    // canonical-edge equality model — direct-graph circulation beyond
+    // exact-edge adjacency is out of scope for Phase 3-7.
+    const hallway = r.rooms.find((rm) => rm.kind === 'hallway')
+    expect(hallway).toBeDefined()
+    expect(hallway!.doors).toEqual([])
+    const totalDoors = r.rooms.reduce((n, rm) => n + rm.doors.length, 0)
+    expect(totalDoors).toBeGreaterThanOrEqual(1)
+    for (const rm of r.rooms) {
+      for (const d of rm.doors) {
+        expect(d.from).toBe('hallway')
+        expect(d.to).toBe(rm.kind)
+        // Door wallId references one of this room's partition walls.
+        expect(rm.walls.some((w) => w.id === d.wallId && !w.isExterior)).toBe(
+          true,
+        )
+      }
     }
   })
 })
