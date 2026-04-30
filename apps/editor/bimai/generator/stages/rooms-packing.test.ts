@@ -282,17 +282,20 @@ describe('bisectUnit (success cases)', () => {
 // ─────────────────────────────────────────────────────────────────────
 
 describe('bisectUnit (failure cases)', () => {
-  it('fails with rooms_too_small when a 1BR is packed into 4×8', () => {
+  it('fails with rooms_too_small when a 1BR is packed into 4×12 (in band, but the hallway-strip bathroom is 1.44 m long)', () => {
+    // 48 m² is inside the 1BR band [45, 70] so the area-band gate
+    // does not fire; the hallway-strip width is 0.12 × 12 = 1.44 m,
+    // below the 1.5 m floor — that's the failure we're documenting.
     const r = bisectUnit(
       makeUnit({
         type: '1BR',
         polygon: [
           [0, 0],
-          [8, 0],
-          [8, 4],
+          [12, 0],
+          [12, 4],
           [0, 4],
         ],
-        area: 32,
+        area: 48,
         facadeEdges: [2],
       }),
       getUnitTemplate('1BR')!,
@@ -319,6 +322,155 @@ describe('bisectUnit (failure cases)', () => {
     )
     expect(r.ok).toBe(false)
     if (!r.ok) expect(r.reason).toBe('unit_not_rectangular')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────
+// Area-band gate (Phase 3-7 follow-up to Task 8)
+// ─────────────────────────────────────────────────────────────────────
+
+describe('bisectUnit area-band gate', () => {
+  // The gate uses asymmetric tolerances: 0.85 × min on the small side,
+  // 1.5 × max on the large side. Tests pin both sides of every band
+  // and the boundary behaviour at the upper edge (1BR: 1.5 × 70 = 105).
+
+  it('Studio at the nominal 40 m² passes the gate', () => {
+    const r = bisectUnit(
+      makeUnit({
+        type: 'Studio',
+        polygon: [
+          [0, 0],
+          [8, 0],
+          [8, 5],
+          [0, 5],
+        ],
+        area: 40,
+        facadeEdges: [2],
+      }),
+      getUnitTemplate('Studio')!,
+    )
+    // Either ok (success) or a downstream failure; what we're asserting
+    // is that the area-band gate did NOT fire.
+    if (!r.ok) {
+      expect(r.reason).not.toBe('unit_too_small_for_template')
+      expect(r.reason).not.toBe('unit_too_large_for_template')
+    }
+  })
+
+  it('Studio at 25 m² (below 0.85 × 30 = 25.5) fails with unit_too_small_for_template', () => {
+    const r = bisectUnit(
+      makeUnit({
+        type: 'Studio',
+        polygon: [
+          [0, 0],
+          [5, 0],
+          [5, 5],
+          [0, 5],
+        ],
+        area: 25,
+        facadeEdges: [2],
+      }),
+      getUnitTemplate('Studio')!,
+    )
+    expect(r.ok).toBe(false)
+    if (!r.ok) {
+      expect(r.reason).toBe('unit_too_small_for_template')
+      expect(r.areaBand).toEqual({
+        actualAreaM2: 25,
+        bandMin: 30,
+        bandMax: 50,
+        nominalM2: 40,
+      })
+    }
+  })
+
+  it('1BR at 200 m² (above 1.5 × 70 = 105) fails with unit_too_large_for_template', () => {
+    const r = bisectUnit(
+      makeUnit({
+        type: '1BR',
+        polygon: [
+          [0, 0],
+          [20, 0],
+          [20, 10],
+          [0, 10],
+        ],
+        area: 200,
+        facadeEdges: [2],
+      }),
+      getUnitTemplate('1BR')!,
+    )
+    expect(r.ok).toBe(false)
+    if (!r.ok) {
+      expect(r.reason).toBe('unit_too_large_for_template')
+      expect(r.areaBand?.actualAreaM2).toBe(200)
+      expect(r.areaBand?.bandMax).toBe(70)
+      expect(r.areaBand?.nominalM2).toBe(55)
+    }
+  })
+
+  it('boundary: 1BR at exactly 105 m² passes the gate; at 105.1 fails', () => {
+    // 1.5 × 70 = 105 exactly.
+    const at = bisectUnit(
+      makeUnit({
+        type: '1BR',
+        polygon: [
+          [0, 0],
+          [15, 0],
+          [15, 7],
+          [0, 7],
+        ],
+        area: 105,
+        facadeEdges: [2],
+      }),
+      getUnitTemplate('1BR')!,
+    )
+    if (!at.ok) {
+      expect(at.reason).not.toBe('unit_too_large_for_template')
+    }
+
+    const over = bisectUnit(
+      makeUnit({
+        type: '1BR',
+        polygon: [
+          [0, 0],
+          [15, 0],
+          [15, 7],
+          [0, 7],
+        ],
+        area: 105.1,
+        facadeEdges: [2],
+      }),
+      getUnitTemplate('1BR')!,
+    )
+    expect(over.ok).toBe(false)
+    if (!over.ok) expect(over.reason).toBe('unit_too_large_for_template')
+  })
+
+  it('the gate fires before the dimension-floor walk (caller can fall back without seeing opaque "bathroom 0.96 m" failures)', () => {
+    // 1BR at 32 m² in a 4×8 strip — same shape as the legacy
+    // rooms_too_small fixture. With the gate in place this now reports
+    // unit_too_small_for_template (32 < 0.85 × 45 = 38.25), giving the
+    // panel a clean "wrong template for this area" message instead of
+    // a deep dimension-floor detail.
+    const r = bisectUnit(
+      makeUnit({
+        type: '1BR',
+        polygon: [
+          [0, 0],
+          [8, 0],
+          [8, 4],
+          [0, 4],
+        ],
+        area: 32,
+        facadeEdges: [2],
+      }),
+      getUnitTemplate('1BR')!,
+    )
+    expect(r.ok).toBe(false)
+    if (!r.ok) {
+      expect(r.reason).toBe('unit_too_small_for_template')
+      expect(r.areaBand?.actualAreaM2).toBe(32)
+    }
   })
 })
 

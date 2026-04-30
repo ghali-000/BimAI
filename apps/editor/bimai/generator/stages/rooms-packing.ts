@@ -44,6 +44,7 @@ import {
   type SubdivideSpec,
   type UnitTemplate,
   type UnitTemplateConstraints,
+  effectiveAreaBand,
 } from './rooms-templates'
 import { placeRoomDoors } from './rooms-doors'
 import { buildRoomWalls, unitSeedFor } from './rooms-walls'
@@ -331,6 +332,8 @@ export type BisectFailureReason =
   | 'rooms_too_small'
   | 'bedroom_no_facade'
   | 'unit_not_rectangular'
+  | 'unit_too_small_for_template'
+  | 'unit_too_large_for_template'
 
 export interface BisectFailure {
   ok: false
@@ -339,6 +342,18 @@ export interface BisectFailure {
   detail: string
   /** The kind of the room that triggered the failure, if applicable. */
   failingRoom?: RoomKind
+  /**
+   * Area-band failure context. Set only on `unit_too_small_for_template`
+   * and `unit_too_large_for_template`. Lets the caller format a
+   * panel-ready warning (with the band, the nominal, and the actual
+   * area) without re-deriving template internals.
+   */
+  areaBand?: {
+    actualAreaM2: number
+    bandMin: number
+    bandMax: number
+    nominalM2: number
+  }
 }
 
 export interface BisectSuccess {
@@ -361,6 +376,48 @@ export function bisectUnit(unit: UnitPlan, template: UnitTemplate): BisectResult
       detail: `unit polygon has ${unit.polygon.length} vertices, packer expects 4`,
     }
   }
+
+  // Area-band gate (Phase 3-7 follow-up to Task 8). Reject units whose
+  // polygon area is far outside the template's authored band — the
+  // dimension-floor and bathroom-clamp post-checks would catch most of
+  // these, but they fire deep in the walk and produce opaque failure
+  // strings ("bathroom is 1.20 m wide"). Gating up front gives the
+  // panel a clean "wrong template for this unit's area" message and
+  // signals the upstream packer bug it's hiding (e.g. Task 8 trail:
+  // 105×105 m plot produced 3 × 51.75 m strips, 155 m² each, way over
+  // the 4BR band).
+  //
+  // Tolerances are asymmetric (0.85×min on the small side, 1.5×max on
+  // the large side); see `AREA_BAND_TOLERANCE_*` in rooms-templates.ts.
+  const { lowerBound, upperBound } = effectiveAreaBand(template)
+  const actualAreaM2 = unit.area
+  if (actualAreaM2 < lowerBound) {
+    return {
+      ok: false,
+      reason: 'unit_too_small_for_template',
+      detail: `unit area ${actualAreaM2.toFixed(1)} m² is below the ${template.unitType} gate floor of ${lowerBound.toFixed(1)} m² (band ${template.areaRangeM2.min}-${template.areaRangeM2.max} m², expected ~${template.areaRangeM2.nominal} m²)`,
+      areaBand: {
+        actualAreaM2,
+        bandMin: template.areaRangeM2.min,
+        bandMax: template.areaRangeM2.max,
+        nominalM2: template.areaRangeM2.nominal,
+      },
+    }
+  }
+  if (actualAreaM2 > upperBound) {
+    return {
+      ok: false,
+      reason: 'unit_too_large_for_template',
+      detail: `unit area ${actualAreaM2.toFixed(1)} m² is above the ${template.unitType} gate ceiling of ${upperBound.toFixed(1)} m² (band ${template.areaRangeM2.min}-${template.areaRangeM2.max} m², expected ~${template.areaRangeM2.nominal} m²)`,
+      areaBand: {
+        actualAreaM2,
+        bandMin: template.areaRangeM2.min,
+        bandMax: template.areaRangeM2.max,
+        nominalM2: template.areaRangeM2.nominal,
+      },
+    }
+  }
+
   const obb = computeOrientedBoundingBox(unit.polygon)
   const facade = buildFacadeMask(unit.polygon, unit.facadeEdges, obb)
   const rootRect: LocalRect = { x: 0, y: 0, w: obb.width, h: obb.height }

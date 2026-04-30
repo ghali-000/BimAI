@@ -95,12 +95,40 @@ export function attachRoomsToUnits(units: UnitPlan[]): AttachRoomsResult {
     }
     const result = bisectUnit(u, template)
     if (!result.ok) {
-      warnings.push(
-        `unit ${i} (${u.type}): could not be subdivided — ${result.detail}`,
-      )
+      warnings.push(formatBisectFailureWarning(i, u, result))
       return { ...u, rooms: unitShellLayout(u) }
     }
     return { ...u, rooms: result.rooms }
   })
   return { units: out, warnings }
+}
+
+/**
+ * Format a panel-ready warning for a `bisectUnit` failure. The
+ * area-band cases get explicit "Likely cause" hints so a reviewer can
+ * tell at a glance whether the failure is downstream (template too
+ * tight) or upstream (unit packer producing the wrong size). The other
+ * failure reasons fall through to the legacy detail string.
+ */
+function formatBisectFailureWarning(
+  index: number,
+  unit: UnitPlan,
+  result: import('./rooms-packing').BisectFailure,
+): string {
+  const prefix = `Unit ${index} (${unit.type}, ${unit.area.toFixed(0)} m²)`
+  if (
+    (result.reason === 'unit_too_small_for_template' ||
+      result.reason === 'unit_too_large_for_template') &&
+    result.areaBand
+  ) {
+    const { bandMin, bandMax, nominalM2 } = result.areaBand
+    const direction =
+      result.reason === 'unit_too_small_for_template' ? 'too small' : 'too large'
+    const cause =
+      result.reason === 'unit_too_small_for_template'
+        ? 'unit packer producing undersized strips'
+        : 'unit packer producing oversized strips'
+    return `${prefix} ${direction} for ${unit.type} template (range ${bandMin}-${bandMax} m², expected ~${nominalM2} m²). Falling back to unit-shell. Likely cause: ${cause}.`
+  }
+  return `${prefix}: could not be subdivided — ${result.detail}. Falling back to unit-shell.`
 }

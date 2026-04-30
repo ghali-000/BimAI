@@ -436,7 +436,7 @@ describe('packUnits', () => {
 
     // Sanity check on the band constants — if MIN/MAX move, the fixture
     // arithmetic above stops holding.
-    expect(MIN_UNIT_WIDTH_M).toBe(3)
+    expect(MIN_UNIT_WIDTH_M).toBe(4)
     expect(MAX_UNIT_WIDTH_M).toBe(9)
   })
 })

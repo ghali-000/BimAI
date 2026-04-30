@@ -175,35 +175,37 @@ describe('expected leaf-kind sets per unit type', () => {
 })
 
 describe('area bands', () => {
-  it('every template declares a positive, ordered band', () => {
+  it('every template declares a positive, ordered band with a nominal in [min, max]', () => {
     for (const t of listUnitTemplates()) {
-      expect(t.areaRangeM2.minM2).toBeGreaterThan(0)
-      expect(t.areaRangeM2.maxM2).toBeGreaterThan(t.areaRangeM2.minM2)
+      expect(t.areaRangeM2.min).toBeGreaterThan(0)
+      expect(t.areaRangeM2.max).toBeGreaterThan(t.areaRangeM2.min)
+      expect(t.areaRangeM2.nominal).toBeGreaterThanOrEqual(t.areaRangeM2.min)
+      expect(t.areaRangeM2.nominal).toBeLessThanOrEqual(t.areaRangeM2.max)
     }
   })
 
-  it('bands match the brief (Studio 35-45 ... 4BR 130-160)', () => {
-    expect(getUnitTemplate('Studio')!.areaRangeM2).toEqual({ minM2: 35, maxM2: 45 })
-    expect(getUnitTemplate('1BR')!.areaRangeM2).toEqual({ minM2: 50, maxM2: 65 })
-    expect(getUnitTemplate('2BR')!.areaRangeM2).toEqual({ minM2: 75, maxM2: 90 })
-    expect(getUnitTemplate('3BR')!.areaRangeM2).toEqual({ minM2: 100, maxM2: 120 })
-    expect(getUnitTemplate('4BR')!.areaRangeM2).toEqual({ minM2: 130, maxM2: 160 })
+  it('bands match the brief (EU mid-rise residential 2025 baseline)', () => {
+    expect(getUnitTemplate('Studio')!.areaRangeM2).toEqual({ min: 30, max: 50, nominal: 40 })
+    expect(getUnitTemplate('1BR')!.areaRangeM2).toEqual({ min: 45, max: 70, nominal: 55 })
+    expect(getUnitTemplate('2BR')!.areaRangeM2).toEqual({ min: 70, max: 100, nominal: 82 })
+    expect(getUnitTemplate('3BR')!.areaRangeM2).toEqual({ min: 90, max: 130, nominal: 105 })
+    expect(getUnitTemplate('4BR')!.areaRangeM2).toEqual({ min: 120, max: 180, nominal: 145 })
   })
 
   it('isAreaInBand: midpoint inside, endpoints inside, outside outside', () => {
     const t = getUnitTemplate('2BR')!
-    expect(isAreaInBand(t, 82.5)).toBe(true)
-    expect(isAreaInBand(t, 75)).toBe(true)
-    expect(isAreaInBand(t, 90)).toBe(true)
-    expect(isAreaInBand(t, 74.9)).toBe(false)
-    expect(isAreaInBand(t, 90.1)).toBe(false)
+    expect(isAreaInBand(t, 82)).toBe(true)
+    expect(isAreaInBand(t, 70)).toBe(true)
+    expect(isAreaInBand(t, 100)).toBe(true)
+    expect(isAreaInBand(t, 69.9)).toBe(false)
+    expect(isAreaInBand(t, 100.1)).toBe(false)
   })
 })
 
 describe('computeLeafAllocations', () => {
   it('sums to the total area', () => {
     for (const t of listUnitTemplates()) {
-      const mid = (t.areaRangeM2.minM2 + t.areaRangeM2.maxM2) / 2
+      const mid = (t.areaRangeM2.min + t.areaRangeM2.max) / 2
       const sum = computeLeafAllocations(t, mid).reduce(
         (acc, l) => acc + l.areaM2,
         0,
@@ -239,7 +241,7 @@ describe('computeLeafAllocations', () => {
     // The hallway strip's bathroom (the smaller of the two, in 4BR)
     // is the common case; it should never need clamping at mid-band.
     for (const t of listUnitTemplates()) {
-      const mid = (t.areaRangeM2.minM2 + t.areaRangeM2.maxM2) / 2
+      const mid = (t.areaRangeM2.min + t.areaRangeM2.max) / 2
       const allocs = computeLeafAllocations(t, mid)
       const baths = allocs.filter((a) => a.kind === 'bathroom')
       if (baths.length === 0) continue // (no template currently has zero baths, but be defensive)
@@ -271,7 +273,7 @@ describe('validateTemplate', () => {
   function tpl(rootSplit: SubdivideSpec): UnitTemplate {
     return {
       unitType: 'TEST',
-      areaRangeM2: { minM2: 30, maxM2: 60 },
+      areaRangeM2: { min: 30, max: 60, nominal: 45 },
       rootSplit,
       constraints: {
         bedroomNeedsFacade: true,
@@ -379,7 +381,7 @@ describe('validateTemplate', () => {
   it('throws on inverted or zero areaRangeM2', () => {
     const bad: UnitTemplate = {
       unitType: 'TEST',
-      areaRangeM2: { minM2: 60, maxM2: 30 }, // inverted
+      areaRangeM2: { min: 60, max: 30, nominal: 45 }, // inverted
       rootSplit: { axis: 'along', slices: [{ fraction: 1.0, kind: 'living' }] },
       constraints: {
         bedroomNeedsFacade: true,

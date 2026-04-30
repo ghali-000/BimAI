@@ -74,16 +74,30 @@ export interface UnitTemplateConstraints {
 }
 
 /**
- * Inclusive [min, max] area band the template was authored against.
- * The Task 4 packer uses this to decide whether the unit's polygon is
- * inside the template's design envelope; far outside → fall back to
- * unit-shell rather than instantiate a layout that won't satisfy the
- * minRoomDimensionM floor anyway. Bands are EU mid-rise residential
- * conventions, not authoritative numbers.
+ * Inclusive [min, max] area band the template was authored against,
+ * with a `nominal` typical-case area for fixtures and reporting.
+ *
+ * The packer's area-band gate (Phase 3-7 follow-up to Task 8) uses
+ * `min`/`max` to decide whether a unit polygon is in the template's
+ * design envelope: far outside → fall back to unit-shell rather than
+ * instantiate a layout that won't satisfy `minRoomDimensionM` anyway.
+ * Tolerances are asymmetric (0.85×min on the small side, 1.5×max on
+ * the large side) — real apartments commonly stretch 50% above the
+ * "typical 1BR" without ceasing to be a 1BR, but they don't shrink
+ * 15% below without changing type. Bands and `nominal` values are EU
+ * mid-rise residential 2025 baselines, not authoritative numbers.
+ *
+ * Bands overlap intentionally: a 70 m² unit could be a generous 1BR
+ * or a tight 2BR depending on layout. The unit packer is what assigns
+ * type; the template only validates that the chosen type fits.
  */
 export interface AreaRangeM2 {
-  minM2: number
-  maxM2: number
+  /** Lower band edge in m². */
+  min: number
+  /** Upper band edge in m². */
+  max: number
+  /** Typical-case area used in fixtures and panel reporting. */
+  nominal: number
 }
 
 export interface UnitTemplate {
@@ -129,7 +143,7 @@ const DEFAULT_CONSTRAINTS: UnitTemplateConstraints = {
 /** Studio (35-45 m²): bath strip + open living. No hallway at this size. */
 const STUDIO_TEMPLATE: UnitTemplate = {
   unitType: 'Studio',
-  areaRangeM2: { minM2: 35, maxM2: 45 },
+  areaRangeM2: { min: 30, max: 50, nominal: 40 },
   rootSplit: {
     axis: 'along',
     slices: [
@@ -153,7 +167,7 @@ const STUDIO_TEMPLATE: UnitTemplate = {
  */
 const ONE_BR_TEMPLATE: UnitTemplate = {
   unitType: '1BR',
-  areaRangeM2: { minM2: 50, maxM2: 65 },
+  areaRangeM2: { min: 45, max: 70, nominal: 55 },
   rootSplit: {
     axis: 'along',
     slices: [
@@ -190,7 +204,7 @@ const ONE_BR_TEMPLATE: UnitTemplate = {
  */
 const TWO_BR_TEMPLATE: UnitTemplate = {
   unitType: '2BR',
-  areaRangeM2: { minM2: 75, maxM2: 90 },
+  areaRangeM2: { min: 70, max: 100, nominal: 82 },
   rootSplit: {
     axis: 'along',
     slices: [
@@ -239,7 +253,7 @@ const TWO_BR_TEMPLATE: UnitTemplate = {
  */
 const THREE_BR_TEMPLATE: UnitTemplate = {
   unitType: '3BR',
-  areaRangeM2: { minM2: 100, maxM2: 120 },
+  areaRangeM2: { min: 90, max: 130, nominal: 105 },
   rootSplit: {
     axis: 'along',
     slices: [
@@ -286,7 +300,7 @@ const THREE_BR_TEMPLATE: UnitTemplate = {
  */
 const FOUR_BR_TEMPLATE: UnitTemplate = {
   unitType: '4BR',
-  areaRangeM2: { minM2: 130, maxM2: 160 },
+  areaRangeM2: { min: 120, max: 180, nominal: 145 },
   rootSplit: {
     axis: 'along',
     slices: [
@@ -412,10 +426,17 @@ function validateSpec(
  * deep inside the packer.
  */
 export function validateTemplate(t: UnitTemplate): void {
-  const { minM2, maxM2 } = t.areaRangeM2
-  if (!(minM2 > 0) || !(maxM2 > 0) || minM2 >= maxM2) {
+  const { min, max, nominal } = t.areaRangeM2
+  if (!(min > 0) || !(max > 0) || min >= max) {
     throw new InvalidTemplateError(
-      `areaRangeM2 invalid: min=${minM2}, max=${maxM2}`,
+      `areaRangeM2 invalid: min=${min}, max=${max}`,
+      t.unitType,
+      'areaRangeM2',
+    )
+  }
+  if (!(nominal >= min) || !(nominal <= max)) {
+    throw new InvalidTemplateError(
+      `areaRangeM2.nominal (${nominal}) must lie in [${min}, ${max}]`,
       t.unitType,
       'areaRangeM2',
     )
@@ -467,8 +488,36 @@ export function computeLeafAllocations(
 
 /** True if the polygon area is inside the template's authored band. */
 export function isAreaInBand(template: UnitTemplate, areaM2: number): boolean {
-  const { minM2, maxM2 } = template.areaRangeM2
-  return areaM2 >= minM2 && areaM2 <= maxM2
+  const { min, max } = template.areaRangeM2
+  return areaM2 >= min && areaM2 <= max
+}
+
+/**
+ * Asymmetric tolerance multipliers for the bisectUnit area-band gate.
+ * 0.85 × min on the small side: real apartments don't shrink below their
+ * type without becoming a different type (a "tiny 1BR" is a Studio).
+ * 1.5 × max on the large side: generous floor plans routinely run 50%
+ * above the nominal "1BR/2BR" without changing type. Symmetric
+ * tolerances would either over-fail generous-but-real plans or
+ * over-accept undersized ones.
+ */
+export const AREA_BAND_TOLERANCE_LOW = 0.85
+export const AREA_BAND_TOLERANCE_HIGH = 1.5
+
+/**
+ * Effective gate bounds (the band stretched by the tolerance multipliers).
+ * Outside these bounds, `bisectUnit` rejects the unit and the pipeline
+ * surfaces a typed warning so the silent fallback doesn't hide an
+ * upstream packing bug (Phase 3-7 Task 8 trail: 105×105 plot produced
+ * 3 × 51.75 m strips, 155 m² each, way over the 4BR band).
+ */
+export function effectiveAreaBand(
+  template: UnitTemplate,
+): { lowerBound: number; upperBound: number } {
+  return {
+    lowerBound: template.areaRangeM2.min * AREA_BAND_TOLERANCE_LOW,
+    upperBound: template.areaRangeM2.max * AREA_BAND_TOLERANCE_HIGH,
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────

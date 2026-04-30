@@ -96,8 +96,19 @@ export interface PackUnitsResult {
 /** Two strips per floor: +perpendicular (left) and −perpendicular (right). */
 const STRIP_COUNT = 2
 
-/** Habitability band for unit width along the long axis. */
-export const MIN_UNIT_WIDTH_M = 3
+/**
+ * Habitability band for unit width along the long axis.
+ *
+ * Floor of 4 m (not 3 m) is set by the 1BR/2BR/3BR template's strip-1
+ * 0.6/0.4 hallway/bathroom split: a 3 m unit gives a 1.2 m bathroom
+ * across-extent, which fails `minRoomDimensionM = 1.5` in `bisectUnit`
+ * and silently falls back to unit-shell. With 4 m, the bathroom is
+ * 0.4 × 4 = 1.6 m, comfortably above the floor. Studio's strip-1 is
+ * full-width and unaffected at either floor; the templates trade tight
+ * bathrooms for deterministic subdivision below 4 m. See PROGRESS.md
+ * Phase 3-7 Task 8 for the diagnosis trail.
+ */
+export const MIN_UNIT_WIDTH_M = 4
 export const MAX_UNIT_WIDTH_M = 9
 
 /** Drift threshold for the per-type `area_drift` summary warning. */
