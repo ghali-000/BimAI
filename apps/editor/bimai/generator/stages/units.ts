@@ -50,7 +50,12 @@ import type {
   UnitOrderingHeuristic,
 } from '../../optimizer/params'
 import type { Program } from '../../schemas'
-import type { CorridorMode, CorridorPlan, UnitPlan } from '../types'
+import type {
+  CorridorMode,
+  CorridorPlan,
+  ReservedCorridorRegion,
+  UnitPlan,
+} from '../types'
 import { asRectangle } from './corridor'
 import {
   AREA_BAND_TOLERANCE_HIGH,
@@ -241,6 +246,31 @@ export function packUnits(input: PackUnitsInput): PackUnitsResult | null {
   const stripSigns = STRIP_SIGNS_BY_MODE[mode]
   const STRIP_COUNT = stripSigns.length
 
+  // Phase 3-8: honour `corridor.reservedRegions` (stair / elevator shaft
+  // footprints). 3-8 only supports end-of-strip reservations — intervals
+  // touching ±halfL — so the effect is a shorter strip range. Mid-strip
+  // skip-and-resume is the Phase 3-9 path. We accumulate the most
+  // restrictive bounds: the largest uMax among low-end reservations
+  // shrinks the start; the smallest uMin among high-end reservations
+  // shrinks the end.
+  let stripStartU = -halfL
+  let stripEndU = halfL
+  const reservedRegions = corridor.reservedRegions ?? []
+  const SHAFT_REASONS = new Set<ReservedCorridorRegion['reason']>()
+  for (const r of reservedRegions) {
+    if (r.uMin <= -halfL + 1e-6) {
+      if (r.uMax > stripStartU) stripStartU = r.uMax
+      SHAFT_REASONS.add(r.reason)
+    } else if (r.uMax >= halfL - 1e-6) {
+      if (r.uMin < stripEndU) stripEndU = r.uMin
+      SHAFT_REASONS.add(r.reason)
+    } else {
+      // Mid-strip reservation — Phase 3-9. Refuse rather than silently
+      // dropping units across the gap.
+      return null
+    }
+  }
+
   // Expand unitMix into a flat queue of placement attempts. Width is the
   // pre-clamped target value — placement may further narrow it via strip-end
   // clamp.
@@ -343,7 +373,7 @@ export function packUnits(input: PackUnitsInput): PackUnitsResult | null {
   // Per-strip cursors (u-coordinate) and per-strip placed-count for end-edge
   // labelling. We need to retroactively flag the *last* unit of each strip
   // as having a facade end-edge — easiest to track its index.
-  const stripCursors: number[] = new Array(STRIP_COUNT).fill(-halfL)
+  const stripCursors: number[] = new Array(STRIP_COUNT).fill(stripStartU)
   const stripUnitIndices: number[][] = Array.from(
     { length: STRIP_COUNT },
     () => [],
@@ -398,7 +428,7 @@ export function packUnits(input: PackUnitsInput): PackUnitsResult | null {
     for (let attempt = 0; attempt < STRIP_COUNT; attempt++) {
       const idx = (stripIdx + attempt) % STRIP_COUNT
       const cursor = stripCursors[idx]!
-      const remaining = halfL - cursor
+      const remaining = stripEndU - cursor
       if (remaining <= 0) continue
 
       let placedWidth: number
@@ -489,9 +519,16 @@ export function packUnits(input: PackUnitsInput): PackUnitsResult | null {
   }
 
   if (unplaced.length > 0) {
-    warnings.push(
-      `${unplaced.length} unit(s) could not be placed on this floor (program exceeds floor capacity).`,
-    )
+    if (SHAFT_REASONS.size > 0) {
+      const reasons = [...SHAFT_REASONS].join(', ')
+      warnings.push(
+        `unit_clipped_by_stair: ${unplaced.length} unit(s) could not be placed on this floor — corridor strip shortened by ${reasons} reservation.`,
+      )
+    } else {
+      warnings.push(
+        `${unplaced.length} unit(s) could not be placed on this floor (program exceeds floor capacity).`,
+      )
+    }
   }
 
   return { units, unplaced, warnings }

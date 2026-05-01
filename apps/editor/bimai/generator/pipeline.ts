@@ -32,6 +32,8 @@ import { placeCorridor } from './stages/corridor'
 import { chooseFootprint, footprintParamsFrom } from './stages/footprint'
 import { planFloors } from './stages/floors'
 import { attachRoomsToUnits } from './stages/rooms'
+import { computeStairReservation, placeStairCores } from './stages/stairs'
+import { RESIDENTIAL_STAIR } from './stages/stairs-templates'
 import { packUnits } from './stages/units'
 import type { SceneWriter } from './scene-writer'
 import type {
@@ -135,6 +137,18 @@ export function buildPlan(
       }
     }
 
+    // Phase 3-8: stair shaft reservation. Carved out before packing so the
+    // packer skips the easternmost `template.depth` of the corridor strip.
+    // Single-floor buildings get no reservation (no stair core).
+    const stairReservation = computeStairReservation(
+      RESIDENTIAL_STAIR,
+      floorsResult.floorCount,
+      corridor,
+    )
+    if (stairReservation) {
+      corridor.reservedRegions = [stairReservation]
+    }
+
     const packed = packUnits({
       outline: footprint.polygon,
       corridor,
@@ -229,19 +243,35 @@ export function buildPlan(
     }
   }
 
-  // Phase 3-8 stairs/roof: stair placement (Task 4) lands later in the
-  // phase and will populate this array; for the duration of Task 1 we
-  // ship `[]` so the type widens without breaking the planner. The roof
-  // is always present — `flat-with-parapet` is the default residential
-  // mid-rise typology, and `slabPolygon` matches the top-floor slab
-  // outline byte-for-byte. Top-of-building elevation = floorCount × floorHeight.
+  // Phase 3-8 stairs/roof: place the stair core(s) using the canonical
+  // first-floor corridor (geometry is identical per floor in 3-8). The
+  // roof is always present — `flat-with-parapet` is the default
+  // residential mid-rise typology, and `slabPolygon` matches the
+  // top-floor slab outline byte-for-byte. Top-of-building elevation =
+  // floorCount × floorHeight.
+  const stairs = placeStairCores(
+    {
+      footprint: footprint.polygon,
+      floorCount: floorsResult.floorCount,
+      floorHeight: floorsResult.floorHeight,
+      corridor: floors[0]?.corridor ?? {
+        polygon: [],
+        centerline: [
+          [0, 0],
+          [0, 0],
+        ],
+        mode: 'double-loaded',
+      },
+    },
+    RESIDENTIAL_STAIR,
+  )
   const plan: BuildingPlan = {
     generationId: nanoid(),
     footprint: footprint.polygon,
     floorCount: floorsResult.floorCount,
     floorHeight: floorsResult.floorHeight,
     floors,
-    stairs: [],
+    stairs,
     roof: {
       typology: 'flat-with-parapet',
       slabPolygon: footprint.polygon,

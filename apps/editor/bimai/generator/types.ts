@@ -156,6 +156,30 @@ export interface RoomPlan {
  */
 export type CorridorMode = 'double-loaded' | 'single-loaded'
 
+/**
+ * Phase 3-8: a u-axis interval (in the corridor centerline frame) that
+ * the unit packer must skip. Used to carve out the stair shaft footprint
+ * from the unit-strip run before packing.
+ *
+ * `uMin` / `uMax` are in OBB-local corridor coords: `uMin = -runLength/2`
+ * is the centerline's start, `uMax = +runLength/2` is the end. Phase 3-8
+ * supports only end-of-strip reservations (an interval touching either
+ * `±runLength/2`); mid-strip "skip-and-resume" is the Phase 3-9 upgrade
+ * path for a central stair core. The packer asserts the end-of-strip
+ * invariant.
+ */
+export interface ReservedCorridorRegion {
+  /** Lower u-bound (corridor centerline frame, metres). */
+  uMin: number
+  /** Upper u-bound (corridor centerline frame, metres). */
+  uMax: number
+  /**
+   * Why this region is reserved. Surfaced in the typed packer warning
+   * that fires when a unit gets dropped because of the reservation.
+   */
+  reason: 'stair-shaft' | 'elevator-shaft'
+}
+
 export interface CorridorPlan {
   polygon: [number, number][]
   centerline: [[number, number], [number, number]]
@@ -182,6 +206,13 @@ export interface CorridorPlan {
    * `shortLen − corridorWidth` resolves to — capped at TARGET_STRIP_DEPTH_M).
    */
   stripDepth?: number
+  /**
+   * Phase 3-8: u-axis intervals the packer must skip. Populated by the
+   * stairs stage before packing; absent / empty means no reservations.
+   * Intervals are in the corridor centerline frame (see
+   * `ReservedCorridorRegion`).
+   */
+  reservedRegions?: ReservedCorridorRegion[]
 }
 
 export interface FloorPlan {
