@@ -4,6 +4,7 @@ import { calculatePolygonArea } from '../lib/geometry'
 import { roomColor } from '../lib/unit-colors'
 import { placeCorridor } from './stages/corridor'
 import { attachRoomsToUnits } from './stages/rooms'
+import { planRoof } from './stages/roof'
 import { placeStairCores } from './stages/stairs'
 import { RESIDENTIAL_STAIR } from './stages/stairs-templates'
 import { packUnits } from './stages/units'
@@ -66,9 +67,17 @@ describe('emitBuildingPlan', () => {
       buildingId: BUILDING_ID,
       generationId: GEN_ID,
     })
-    const levels = ops.filter((o) => o.node.type === 'level')
-    expect(levels).toHaveLength(1)
-    expect(levels[0]!.parentId).toBe(BUILDING_ID)
+    // Phase 3-8 Task 7 adds a synthetic "Roof" LevelNode pinned at
+    // `level: floorCount` to host parapet walls + the RoofNode marker.
+    // Filter it out here to keep the per-floor invariant readable.
+    const floorLevels = ops.filter(
+      (o) =>
+        o.node.type === 'level' &&
+        (o.node.metadata as { bimai?: { roofRole?: string } })?.bimai
+          ?.roofRole !== 'roof-level',
+    )
+    expect(floorLevels).toHaveLength(1)
+    expect(floorLevels[0]!.parentId).toBe(BUILDING_ID)
   })
 
   it('tags every emitted node with the generation marker', () => {
@@ -269,7 +278,15 @@ describe('emitBuildingPlan', () => {
       buildingId: BUILDING_ID,
       generationId: GEN_ID,
     })
-    expect(ops.filter((o) => o.node.type === 'level')).toHaveLength(3)
+    // Per-floor LevelNodes (excludes the synthetic Roof level from
+    // Task 7).
+    const floorLevels = ops.filter(
+      (o) =>
+        o.node.type === 'level' &&
+        (o.node.metadata as { bimai?: { roofRole?: string } })?.bimai
+          ?.roofRole !== 'roof-level',
+    )
+    expect(floorLevels).toHaveLength(3)
     expect(ops.filter((o) => o.node.type === 'slab')).toHaveLength(3)
   })
 
@@ -1182,6 +1199,296 @@ describe('emitBuildingPlan — stair core (Phase 3-8 Task 5)', () => {
           ((op.node.metadata as { bimai?: { wallRole?: string } })?.bimai
             ?.wallRole === 'stair-shaft'))
       ) {
+        expect(isGenerated(op.node, GEN_ID)).toBe(true)
+      }
+    }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────
+// Phase 3-8 Task 7 — roof emission (synthetic Roof level + RoofNode
+// marker + parapet walls)
+// ─────────────────────────────────────────────────────────────────────
+
+interface RoofMarkerShape {
+  type: 'roof'
+  id: string
+  parentId: string | null
+  position: [number, number, number]
+  rotation: number
+  children: string[]
+  metadata?: { bimai?: Record<string, unknown> }
+}
+
+interface LevelShape {
+  type: 'level'
+  id: string
+  parentId: string | null
+  level: number
+  name?: string
+  metadata?: { bimai?: Record<string, unknown> }
+}
+
+/** Single-floor plan whose roof is built via planRoof (so the parapet
+ *  field is populated and we can exercise the full emission path). */
+function buildPlannedRoofSingleFloor(): BuildingPlan {
+  const base = buildSingleFloorPlan()
+  return {
+    ...base,
+    roof: planRoof({
+      footprint: base.footprint,
+      floorCount: base.floorCount,
+      floorHeight: base.floorHeight,
+    }),
+  }
+}
+
+describe('emitBuildingPlan — roof (Phase 3-8 Task 7)', () => {
+  it('emits one synthetic Roof LevelNode at level=floorCount, parented to the building', () => {
+    const plan = buildPlannedRoofSingleFloor()
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const roofLevels = ops.filter((o) => {
+      const meta = o.node.metadata as { bimai?: { roofRole?: string } }
+      return o.node.type === 'level' && meta?.bimai?.roofRole === 'roof-level'
+    })
+    expect(roofLevels).toHaveLength(1)
+    const lvl = roofLevels[0]!.node as unknown as LevelShape
+    expect(roofLevels[0]!.parentId).toBe(BUILDING_ID)
+    expect(lvl.parentId).toBe(BUILDING_ID)
+    expect(lvl.level).toBe(plan.floorCount)
+    expect(lvl.name).toBe('Roof')
+  })
+
+  it('emits exactly one RoofNode marker parented to the Roof level, with empty children', () => {
+    const plan = buildPlannedRoofSingleFloor()
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const roofs = ops.filter((o) => o.node.type === 'roof')
+    expect(roofs).toHaveLength(1)
+    const roof = roofs[0]!.node as unknown as RoofMarkerShape
+    const roofLevelOp = ops.find((o) => {
+      const meta = o.node.metadata as { bimai?: { roofRole?: string } }
+      return o.node.type === 'level' && meta?.bimai?.roofRole === 'roof-level'
+    })!
+    expect(roofs[0]!.parentId).toBe(roofLevelOp.node.id)
+    expect(roof.parentId).toBe(roofLevelOp.node.id)
+    expect(roof.children).toEqual([])
+    const meta = roof.metadata!.bimai as {
+      roofRole: string
+      typology: string
+      elevation: number
+    }
+    expect(meta.roofRole).toBe('roof-marker')
+    expect(meta.typology).toBe('flat-with-parapet')
+    expect(meta.elevation).toBeCloseTo(plan.floorCount * plan.floorHeight, 9)
+  })
+
+  it('emits four parapet WallNodes (one per polygon edge) parented to the Roof level', () => {
+    const plan = buildPlannedRoofSingleFloor()
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const parapetWalls = ops.filter((o) => {
+      const meta = o.node.metadata as { bimai?: { wallRole?: string } }
+      return o.node.type === 'wall' && meta?.bimai?.wallRole === 'parapet'
+    })
+    expect(parapetWalls).toHaveLength(plan.roof.parapet!.polygon.length)
+    const roofLevelOp = ops.find((o) => {
+      const meta = o.node.metadata as { bimai?: { roofRole?: string } }
+      return o.node.type === 'level' && meta?.bimai?.roofRole === 'roof-level'
+    })!
+    const canonicalIds = new Set(plan.roof.parapet!.wallIds)
+    const seenEdgeIndices = new Set<number>()
+    for (const op of parapetWalls) {
+      expect(op.parentId).toBe(roofLevelOp.node.id)
+      const node = op.node as unknown as {
+        thickness: number
+        height: number
+        frontSide: string
+        backSide: string
+      }
+      expect(node.thickness).toBeCloseTo(plan.roof.parapet!.thickness, 9)
+      expect(node.height).toBeCloseTo(plan.roof.parapet!.height, 9)
+      expect(node.frontSide).toBe('exterior')
+      expect(node.backSide).toBe('exterior')
+      const bimai = (op.node.metadata as { bimai: Record<string, unknown> })
+        .bimai as {
+        wallRole: string
+        canonicalEdgeId: string
+        parapetEdgeIndex: number
+        roofId: string
+      }
+      expect(bimai.wallRole).toBe('parapet')
+      expect(canonicalIds.has(bimai.canonicalEdgeId)).toBe(true)
+      seenEdgeIndices.add(bimai.parapetEdgeIndex)
+      expect(op.node.id).toMatch(/^wall_[A-Za-z0-9_-]+$/)
+    }
+    expect(seenEdgeIndices).toEqual(
+      new Set(plan.roof.parapet!.polygon.map((_, i) => i)),
+    )
+  })
+
+  it('roof level + RoofNode + parapet walls land after every floor level (parent-before-child order)', () => {
+    const plan = buildPlannedRoofSingleFloor()
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const floorLevelIdxs = ops
+      .map((o, i) => {
+        const meta = o.node.metadata as { bimai?: { roofRole?: string } }
+        return o.node.type === 'level' &&
+          meta?.bimai?.roofRole !== 'roof-level'
+          ? i
+          : -1
+      })
+      .filter((i) => i >= 0)
+    const roofLevelIdx = ops.findIndex((o) => {
+      const meta = o.node.metadata as { bimai?: { roofRole?: string } }
+      return o.node.type === 'level' && meta?.bimai?.roofRole === 'roof-level'
+    })
+    for (const i of floorLevelIdxs) expect(roofLevelIdx).toBeGreaterThan(i)
+
+    const roofMarkerIdx = ops.findIndex((o) => o.node.type === 'roof')
+    expect(roofMarkerIdx).toBeGreaterThan(roofLevelIdx)
+    const parapetIdxs = ops
+      .map((o, i) => {
+        const meta = o.node.metadata as { bimai?: { wallRole?: string } }
+        return o.node.type === 'wall' && meta?.bimai?.wallRole === 'parapet'
+          ? i
+          : -1
+      })
+      .filter((i) => i >= 0)
+    for (const i of parapetIdxs) expect(i).toBeGreaterThan(roofLevelIdx)
+  })
+
+  it('parapet wall geometry traces the polygon edges (start/end match the planned polygon)', () => {
+    const plan = buildPlannedRoofSingleFloor()
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const polygon = plan.roof.parapet!.polygon
+    const parapetWalls = ops
+      .filter((o) => {
+        const meta = o.node.metadata as { bimai?: { wallRole?: string } }
+        return o.node.type === 'wall' && meta?.bimai?.wallRole === 'parapet'
+      })
+      .map((o) => ({
+        node: o.node as unknown as {
+          start: [number, number]
+          end: [number, number]
+          metadata: { bimai: { parapetEdgeIndex: number } }
+        },
+      }))
+    for (const { node } of parapetWalls) {
+      const i = node.metadata.bimai.parapetEdgeIndex
+      const a = polygon[i]!
+      const b = polygon[(i + 1) % polygon.length]!
+      expect(node.start[0]).toBeCloseTo(a[0], 9)
+      expect(node.start[1]).toBeCloseTo(a[1], 9)
+      expect(node.end[0]).toBeCloseTo(b[0], 9)
+      expect(node.end[1]).toBeCloseTo(b[1], 9)
+    }
+  })
+
+  it('regen with the same plan keeps canonical parapet edge ids stable on the emitted walls', () => {
+    const plan = buildPlannedRoofSingleFloor()
+    const a = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const b = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const canonicalOf = (ops: ReturnType<typeof emitBuildingPlan>): string[] =>
+      ops
+        .filter((o) => {
+          const meta = o.node.metadata as { bimai?: { wallRole?: string } }
+          return o.node.type === 'wall' && meta?.bimai?.wallRole === 'parapet'
+        })
+        .map(
+          (o) =>
+            (o.node.metadata as { bimai: { canonicalEdgeId: string } }).bimai
+              .canonicalEdgeId,
+        )
+        .sort()
+    expect(canonicalOf(a)).toEqual(canonicalOf(b))
+  })
+
+  it('omits parapet walls (but still emits roof level + RoofNode) for flat-without-parapet typology', () => {
+    const base = buildSingleFloorPlan()
+    const plan: BuildingPlan = {
+      ...base,
+      roof: {
+        typology: 'flat-without-parapet',
+        slabPolygon: base.footprint,
+        elevation: base.floorCount * base.floorHeight,
+      },
+    }
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const parapetWalls = ops.filter((o) => {
+      const meta = o.node.metadata as { bimai?: { wallRole?: string } }
+      return o.node.type === 'wall' && meta?.bimai?.wallRole === 'parapet'
+    })
+    expect(parapetWalls).toHaveLength(0)
+    expect(ops.filter((o) => o.node.type === 'roof')).toHaveLength(1)
+    const roofLevels = ops.filter((o) => {
+      const meta = o.node.metadata as { bimai?: { roofRole?: string } }
+      return o.node.type === 'level' && meta?.bimai?.roofRole === 'roof-level'
+    })
+    expect(roofLevels).toHaveLength(1)
+  })
+
+  it('emits no roof ops for a plan with zero floors', () => {
+    const plan: BuildingPlan = {
+      generationId: GEN_ID,
+      footprint: OUTLINE_30x10,
+      floorCount: 0,
+      floorHeight: 3,
+      floors: [],
+      stairs: [],
+      roof: {
+        typology: 'flat-with-parapet',
+        slabPolygon: OUTLINE_30x10,
+        elevation: 0,
+      },
+      warnings: [],
+      params: DEFAULT_PARAMS,
+    }
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    expect(ops).toEqual([])
+  })
+
+  it('every roof / roof-level / parapet-wall op is tagged generated', () => {
+    const plan = buildPlannedRoofSingleFloor()
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    for (const op of ops) {
+      const isRoofLevel =
+        op.node.type === 'level' &&
+        (op.node.metadata as { bimai?: { roofRole?: string } })?.bimai
+          ?.roofRole === 'roof-level'
+      const isParapet =
+        op.node.type === 'wall' &&
+        (op.node.metadata as { bimai?: { wallRole?: string } })?.bimai
+          ?.wallRole === 'parapet'
+      if (op.node.type === 'roof' || isRoofLevel || isParapet) {
         expect(isGenerated(op.node, GEN_ID)).toBe(true)
       }
     }

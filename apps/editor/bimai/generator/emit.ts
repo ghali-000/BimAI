@@ -21,6 +21,7 @@ import type {
   AnyNodeId,
   DoorNode,
   LevelNode,
+  RoofNode,
   SlabNode,
   StairNode,
   StairSegmentNode,
@@ -39,6 +40,7 @@ import type {
   CorridorPlan,
   FloorPlan,
   NodeOp,
+  RoofPlan,
   StairCorePlan,
   UnitPlan,
 } from './types'
@@ -97,6 +99,14 @@ export function emitBuildingPlan(
   // StairSegmentNode children, one per inter-floor flight).
   for (const stair of plan.stairs) {
     ops.push(...emitStairCore(stair, plan, levelIdByFloor, ctx))
+  }
+  // Phase 3-8 Task 7: roof emission. A synthetic "Roof" LevelNode at
+  // `level: floorCount` parks the parapet walls + RoofNode marker at
+  // top-of-top-slab elevation (Pascal walls have no Y of their own —
+  // they read the level's offset). The top-floor SlabNode itself is
+  // already emitted by the floors stage and is not re-emitted here.
+  if (plan.floors.length > 0) {
+    ops.push(...emitRoof(plan, ctx))
   }
   return ops
 }
@@ -991,6 +1001,136 @@ function emitStairCore(
     node: tagAsGenerated(stairNode, ctx.generationId),
     parentId: ctx.buildingId,
   })
+  return ops
+}
+
+// ── Roof emission (Phase 3-8 Task 7) ────────────────────────────────────────
+
+/** Default "Roof" level name. Surfaced in the scene tree above the top floor. */
+const ROOF_LEVEL_NAME = 'Roof'
+
+/**
+ * Emit the roof: one synthetic `Roof` LevelNode pinned at
+ * `level: floorCount`, a `RoofNode` marker parented to that level,
+ * and one `WallNode` per parapet polygon edge (for
+ * `'flat-with-parapet'` typology). For `'flat-without-parapet'` only
+ * the level + RoofNode marker are emitted; the parapet field is
+ * absent in the plan and no parapet walls are produced.
+ *
+ * Why a synthetic level. WallNodes carry no Y; they inherit it from
+ * their parent LevelNode. Top-of-top-slab world Y =
+ * `floorCount × floorHeight`, so a `level: floorCount` LevelNode is
+ * exactly where parapet walls need to start. Naming it `Roof` (not
+ * `Level N`) keeps the scene tree readable and gives the IFC writer
+ * a stable hook to find "the roof storey" without coordinate math.
+ *
+ * The `RoofNode` is a marker container — empty `children` (no
+ * RoofSegmentNodes). A RoofSegment generates a complete architectural
+ * volume (walls + roof from `roofType`), which would conflict with
+ * our explicit parapet walls and the already-emitted top slab.
+ * Phase 3-9+ may swap this for actual segments when the typology
+ * widens to pitched / gambrel / etc.
+ */
+function emitRoof(plan: BuildingPlan, ctx: EmitContext): NodeOp[] {
+  const ops: NodeOp[] = []
+  const roof = plan.roof
+  const roofLevelId = generateId('level')
+  const roofLevelIndex = plan.floorCount
+
+  const levelNode: LevelNode = {
+    object: 'node',
+    id: roofLevelId,
+    type: 'level',
+    name: ROOF_LEVEL_NAME,
+    parentId: ctx.buildingId,
+    visible: true,
+    level: roofLevelIndex,
+    children: [],
+    metadata: {
+      bimai: {
+        roofRole: 'roof-level',
+        // `elevation` is recorded so consumers (cost / IFC) don't
+        // need to know `floorCount × floorHeight` to place themselves.
+        elevation: roof.elevation,
+      },
+    },
+  } as unknown as LevelNode
+  ops.push({
+    node: tagAsGenerated(levelNode, ctx.generationId),
+    parentId: ctx.buildingId,
+  })
+
+  // RoofNode marker. Emitted before the parapet walls so consumers
+  // walking the ops list see the container before its sibling walls.
+  // Parented to the roof level (LevelNode children union accepts
+  // RoofNode); the IFC writer (Task 9) reads roof.metadata.bimai for
+  // typology + elevation.
+  const roofId = generateId('roof')
+  const roofNode: RoofNode = {
+    object: 'node',
+    id: roofId,
+    type: 'roof',
+    parentId: roofLevelId,
+    visible: true,
+    position: [0, 0, 0],
+    rotation: 0,
+    children: [],
+    metadata: {
+      bimai: {
+        roofRole: 'roof-marker',
+        typology: roof.typology,
+        elevation: roof.elevation,
+      },
+    },
+  } as unknown as RoofNode
+  ops.push({
+    node: tagAsGenerated(roofNode, ctx.generationId),
+    parentId: roofLevelId,
+  })
+
+  // Parapet walls. One per polygon edge (4 for the rectangular
+  // footprint we ship in 3-8). Heights map straight from the plan;
+  // ids carry the canonical-edge hash from `planRoof` so the IFC
+  // writer can resolve "which parapet wall belongs to which edge"
+  // without coordinate matching.
+  if (roof.parapet) {
+    const parapet = roof.parapet
+    for (let i = 0; i < parapet.polygon.length; i++) {
+      const a = parapet.polygon[i]!
+      const b = parapet.polygon[(i + 1) % parapet.polygon.length]!
+      const id = generateId('wall')
+      const node: WallNode = {
+        object: 'node',
+        id,
+        type: 'wall',
+        parentId: roofLevelId,
+        visible: true,
+        start: [a[0], a[1]],
+        end: [b[0], b[1]],
+        thickness: parapet.thickness,
+        height: parapet.height,
+        children: [],
+        // Both sides of a parapet face the outside world (sky on top,
+        // open air on the inside of the roof). 'exterior' both sides
+        // tells the IFC / cost layers to use the exterior bucket.
+        frontSide: 'exterior',
+        backSide: 'exterior',
+        metadata: {
+          bimai: {
+            wallRole: 'parapet',
+            roofId,
+            parapetEdgeIndex: i,
+            canonicalEdgeId: parapet.wallIds[i],
+          },
+        },
+      } as unknown as WallNode
+      ops.push({
+        node: tagAsGenerated(node, ctx.generationId),
+        parentId: roofLevelId,
+      })
+    }
+  }
+
   return ops
 }
 

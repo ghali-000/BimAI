@@ -272,7 +272,9 @@ describe('runGenerator (with writer)', () => {
       expect(isGenerated(n, out.plan.generationId)).toBe(true)
       levelCount++
     }
-    expect(levelCount).toBe(out.plan.floorCount)
+    // Phase 3-8 Task 7: emit adds a synthetic "Roof" LevelNode at
+    // `level: floorCount`, so the running count is `floorCount + 1`.
+    expect(levelCount).toBe(out.plan.floorCount + 1)
   })
 
   it('does not touch user-drawn nodes outside the building subtree', () => {

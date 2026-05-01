@@ -59,6 +59,7 @@ type WallRole =
   | 'party'
   | 'room-partition'
   | 'stair-shaft'
+  | 'parapet'
 
 function readWallRole(node: AnyNode): WallRole | undefined {
   const meta = (node.metadata ?? {}) as Record<string, unknown>
@@ -70,7 +71,8 @@ function readWallRole(node: AnyNode): WallRole | undefined {
     role === 'corridor' ||
     role === 'party' ||
     role === 'room-partition' ||
-    role === 'stair-shaft'
+    role === 'stair-shaft' ||
+    role === 'parapet'
   ) {
     return role
   }
@@ -79,6 +81,13 @@ function readWallRole(node: AnyNode): WallRole | undefined {
 
 function wallContextFromRole(role: WallRole | undefined): WallContext {
   if (role === 'perimeter') return { isExterior: true, isLoadBearing: true }
+  // Parapets are exterior (face the open sky on both sides — top and
+  // inner) but non-load-bearing: they're a perimeter upstand on the
+  // roof slab, not a structural member. Routes through the exterior
+  // bucket so cost / IFC pick brick / facade material rather than
+  // interior drywall, but with `loadBearing: false` so the structural
+  // model stays honest.
+  if (role === 'parapet') return { isExterior: true, isLoadBearing: false }
   // corridor, party, room-partition, stair-shaft, or unknown all default
   // to interior non-load-bearing. Stair-shaft walls would ideally bump the
   // fire rating to A2 (fire-rated egress core), but the materials catalog

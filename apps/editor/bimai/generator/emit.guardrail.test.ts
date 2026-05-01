@@ -15,6 +15,7 @@
 import {
   DoorNode,
   LevelNode,
+  RoofNode,
   SlabNode,
   StairNode,
   StairSegmentNode,
@@ -44,6 +45,7 @@ const SCHEMAS: Record<
   level: LevelNode,
   stair: StairNode,
   'stair-segment': StairSegmentNode,
+  roof: RoofNode,
 }
 
 // Same shape the running app uses (4 Studio + 6 1BR + 4 2BR on 50×30,
@@ -121,6 +123,9 @@ describe('emit drift guardrail', () => {
         // Phase 3-8: realistic input is multi-floor → stair core + segments.
         'stair',
         'stair-segment',
+        // Phase 3-8 Task 7: roof emission adds a synthetic Roof level
+        // (counted under 'level') and a RoofNode marker on it.
+        'roof',
       ]),
     )
 
