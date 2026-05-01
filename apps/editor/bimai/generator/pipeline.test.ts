@@ -115,13 +115,17 @@ describe('buildPlan (pure)', () => {
     }
   })
 
-  it('emits a program_exceeds_capacity failure when no units fit', () => {
-    // With the clamp path (Phase 3-3), `program_exceeds_capacity` only fires
-    // when the footprint's long axis is shorter than MIN_UNIT_WIDTH_M (3m) —
-    // every queue item then fails rule 4 on both strips.
+  it('emits a corridor_layout_failed failure when the footprint is too narrow', () => {
+    // After the Phase 3-7 close-out (fixed strip depth + mode discriminator),
+    // a footprint whose perpendicular usable width falls below MIN_STRIP_DEPTH_M
+    // (4 m) fails at the corridor stage rather than at the packer. The test
+    // previously asserted `program_exceeds_capacity` for the same fixture —
+    // that path is now unreachable from a tiny footprint, because the corridor
+    // refuses to place before the packer ever runs.
     //
     // Plot 4×4.5, all setbacks 0.5 ⇒ envelope 3×3.5, footprint inset 0.5 ⇒
-    // 2×2.5 (area 5 m², above MIN_FOOTPRINT_AREA_M2=4). longLen = 2.5 < 3.
+    // 2×2.5 (area 5 m², above MIN_FOOTPRINT_AREA_M2=4). usable = 2 − 1.5 =
+    // 0.5 < 4 ⇒ placeCorridor returns null.
     const r = buildPlan(
       baseInput({
         plotPolygon: [
@@ -142,7 +146,7 @@ describe('buildPlan (pure)', () => {
     )
     expect(r.ok).toBe(false)
     if (r.ok) return
-    expect(r.reason).toBe('program_exceeds_capacity')
+    expect(r.reason).toBe('corridor_layout_failed')
   })
 })
 

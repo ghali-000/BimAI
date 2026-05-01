@@ -28,6 +28,7 @@ import type {
 } from '@pascal-app/core'
 import type { Polygon2D, Point2D } from '../lib/envelope'
 import { roomColor, unitColor } from '../lib/unit-colors'
+import { traceGroup, traceGroupEnd, traceLog } from './debug'
 import { generateId } from './ids'
 import { asRectangle } from './stages/corridor'
 import { tagAsGenerated } from './tag'
@@ -106,12 +107,19 @@ function emitFloor(
   // The map is keyed by RoomWall.id so room doors (Task 8) can resolve
   // their host wall without floating-point coordinate matching.
   const partitionByRoomWallId = new Map<string, WallNode>()
+  let partitionCount = 0
   for (const { node, roomWallId } of emitRoomPartitions(floor, plan, ctx)) {
     ops.push({ node, parentId: levelId })
     partitionByRoomWallId.set(roomWallId, node)
+    partitionCount++
   }
 
+  // [BimAI Generation Trace] — emit stage (gated on localStorage flag)
+  traceGroup(`STAGE: emit (floor ${floor.level})`)
+  traceLog(`  partition walls emitted: ${partitionCount}`)
+
   // Zones (one per unit, plus one per room within each unit).
+  let totalRoomZones = 0
   for (const unit of floor.units) {
     const unitZoneOp = emitUnitZone(levelId, unit, ctx)
     ops.push(unitZoneOp)
@@ -119,10 +127,18 @@ function emitFloor(
     // unit zone but linked to it via `metadata.bimai.unitId`. Test
     // fixtures predating 3-7 have `unit.rooms === undefined`, so the
     // `?? []` keeps them green.
+    let roomZonesForUnit = 0
     for (const op of emitRoomZones(levelId, unit, unitZoneOp.node.id, ctx)) {
       ops.push(op)
+      roomZonesForUnit++
     }
+    totalRoomZones += roomZonesForUnit
+    traceLog(
+      `  unit ${unit.type} (${unit.area.toFixed(1)}m²): ${roomZonesForUnit} room zones [${(unit.rooms ?? []).map((r) => r.kind).join(', ') || 'none'}]`,
+    )
   }
+  traceLog(`  total room zones on floor ${floor.level}: ${totalRoomZones}`)
+  traceGroupEnd()
 
   // Openings (children of walls).
   for (const unit of floor.units) {
@@ -260,7 +276,13 @@ function emitRoomZones(
       object: 'node',
       id,
       type: 'zone',
-      name: `${unit.type} · ${room.kind}`,
+      // Label is just the room kind ('bedroom', 'kitchen', ...) so it
+      // reads cleanly *inside* the polygon at architechtures.com-style
+      // zoom. The owning unit's type is already on the parent zone's
+      // name; duplicating it here makes the in-polygon label too long
+      // to fit small rooms like bathrooms. Consumers that need the
+      // unit context read `metadata.bimai.unitType`.
+      name: room.kind,
       parentId: levelId,
       visible: true,
       polygon: room.polygon.map((p) => [p[0], p[1]] as [number, number]),

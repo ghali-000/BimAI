@@ -14,12 +14,24 @@ import { chooseFootprint } from './footprint'
 import { planFloors } from './floors'
 import { packUnits } from './units'
 
-// 30×10 axis-aligned outline: long axis = X, short axis = Y.
+// 30×10 axis-aligned outline: long axis = X, short axis = Y. After the
+// Phase 3-7 close-out (fixed strip depth + mode discriminator) this plate
+// is too narrow for double-loaded — falls back to single-loaded.
 const OUTLINE_30x10: [number, number][] = [
   [0, 0],
   [30, 0],
   [30, 10],
   [0, 10],
+]
+
+// 50×30 wide plate: usable = 28.5 ≥ 2 × TARGET_STRIP_DEPTH_M (18) ⇒
+// double-loaded with fixed 9 m strips. Used by packing-strategy tests
+// that need both strips populated.
+const OUTLINE_50x30: [number, number][] = [
+  [0, 0],
+  [50, 0],
+  [50, 30],
+  [0, 30],
 ]
 
 // 12×10 nearly-square outline — exercises 'auto' corridor orientation
@@ -55,21 +67,26 @@ const baseMix = (m: Program['unitMix']): Program['unitMix'] => m
 // ── Corridor orientation ────────────────────────────────────────────────────
 
 describe('placeCorridor — orientation parameter', () => {
-  it("default 'long-axis' picks the long edge (Phase 3-3 behaviour)", () => {
+  it("default 'long-axis' picks the long edge (Phase 3-7 single-loaded fallback)", () => {
+    // 30×10 usable = 8.5 < 18 (= 2 × TARGET) ⇒ single-loaded; stripDepth =
+    // residual usable. Run length still equals long edge.
     const c = placeCorridor(OUTLINE_30x10, { width: 1.5 })
     expect(c).not.toBeNull()
     if (!c) return
+    expect(c.mode).toBe('single-loaded')
     expect(c.runLength).toBeCloseTo(30, 6)
-    expect(c.stripDepth).toBeCloseTo(4.25, 6) // (10 − 1.5)/2
+    expect(c.stripDepth).toBeCloseTo(8.5, 6) // 10 − 1.5
   })
 
   it("'short-axis' runs the corridor across the rectangle's short side", () => {
+    // 30×10 with corridor on short axis: perpendicular = longLen = 30,
+    // usable = 28.5 ≥ 18 ⇒ double-loaded with fixed 9 m strips.
     const c = placeCorridor(OUTLINE_30x10, { width: 1.5, orientation: 'short-axis' })
     expect(c).not.toBeNull()
     if (!c) return
+    expect(c.mode).toBe('double-loaded')
     expect(c.runLength).toBeCloseTo(10, 6)
-    // Strip depth perpendicular to short axis = (longLen − width)/2.
-    expect(c.stripDepth).toBeCloseTo((30 - 1.5) / 2, 6)
+    expect(c.stripDepth).toBe(9)
     // Centerline runs along Y (short axis), not X.
     const [a, b] = c.centerline
     expect(Math.abs(b[0] - a[0])).toBeLessThan(1e-9)
@@ -242,33 +259,32 @@ describe('packUnits — strategy + ordering', () => {
     return c
   }
 
-  // 30×10 with 1.5m corridor on long axis: each strip 30×4.25, fits ~6 units
-  // at 5m wide.
-  const STRIP_DEPTH = 4.25
+  // 50×30 plate: double-loaded, two 9 m strips. Used by tests that exercise
+  // strip-switching behaviour. (30×10 is now single-loaded — only one strip
+  // — so it can't demonstrate alternating / grouped-by-type splits.)
+  const STRIP_DEPTH = 9
+
+  // Corridor centerline of OUTLINE_50x30 is at y=15.
+  const CY = 15
 
   it("packingStrategy 'left-to-right' (default) fills strip 0 first", () => {
     const r = packUnits({
-      outline: OUTLINE_30x10,
-      corridor: corr(OUTLINE_30x10),
+      outline: OUTLINE_50x30,
+      corridor: corr(OUTLINE_50x30),
       corridorWidth: 1.5,
-      // 4 units × 5m = 20m → all fit on strip 0 (cap is 30m).
+      // 4 units × 5m = 20m → all fit on strip 0 (cap is 50m).
       unitMix: baseMix([{ type: 'studio', count: 4, targetArea: STRIP_DEPTH * 5 }]),
     })
     expect(r).not.toBeNull()
     if (!r) return
-    // All 4 units land on strip 0 (positive Y in this outline).
-    const ys = r.units.map((u) => {
-      // Average y of unit polygon vertices.
-      return u.polygon.reduce((s, p) => s + p[1], 0) / u.polygon.length
-    })
-    // All on the same side of the corridor (centerline at y = 5).
-    expect(ys.every((y) => y > 5) || ys.every((y) => y < 5)).toBe(true)
+    const ys = r.units.map((u) => u.polygon.reduce((s, p) => s + p[1], 0) / u.polygon.length)
+    expect(ys.every((y) => y > CY) || ys.every((y) => y < CY)).toBe(true)
   })
 
   it("packingStrategy 'alternating' splits units across both strips", () => {
     const r = packUnits({
-      outline: OUTLINE_30x10,
-      corridor: corr(OUTLINE_30x10),
+      outline: OUTLINE_50x30,
+      corridor: corr(OUTLINE_50x30),
       corridorWidth: 1.5,
       unitMix: baseMix([{ type: 'studio', count: 4, targetArea: STRIP_DEPTH * 5 }]),
       packingStrategy: 'alternating',
@@ -276,17 +292,16 @@ describe('packUnits — strategy + ordering', () => {
     expect(r).not.toBeNull()
     if (!r) return
     const ys = r.units.map((u) => u.polygon.reduce((s, p) => s + p[1], 0) / u.polygon.length)
-    const above = ys.filter((y) => y > 5).length
-    const below = ys.filter((y) => y < 5).length
-    // Even split — 2 on each strip.
+    const above = ys.filter((y) => y > CY).length
+    const below = ys.filter((y) => y < CY).length
     expect(above).toBe(2)
     expect(below).toBe(2)
   })
 
   it("packingStrategy 'grouped-by-type' switches strips on type change", () => {
     const r = packUnits({
-      outline: OUTLINE_30x10,
-      corridor: corr(OUTLINE_30x10),
+      outline: OUTLINE_50x30,
+      corridor: corr(OUTLINE_50x30),
       corridorWidth: 1.5,
       unitMix: baseMix([
         { type: 'studio', count: 2, targetArea: STRIP_DEPTH * 5 },
@@ -296,25 +311,23 @@ describe('packUnits — strategy + ordering', () => {
     })
     expect(r).not.toBeNull()
     if (!r) return
-    // Studios on one strip, 1BRs on the other.
     const studios = r.units.filter((u) => u.type === 'studio')
     const oneBRs = r.units.filter((u) => u.type === '1BR')
     const yStudio = studios.map((u) => u.polygon.reduce((s, p) => s + p[1], 0) / u.polygon.length)
     const yOneBR = oneBRs.map((u) => u.polygon.reduce((s, p) => s + p[1], 0) / u.polygon.length)
-    const studiosOnSide = yStudio.every((y) => y > 5) || yStudio.every((y) => y < 5)
-    const oneBROnOtherSide = yOneBR.every((y) => y > 5) || yOneBR.every((y) => y < 5)
+    const studiosOnSide = yStudio.every((y) => y > CY) || yStudio.every((y) => y < CY)
+    const oneBROnOtherSide = yOneBR.every((y) => y > CY) || yOneBR.every((y) => y < CY)
     expect(studiosOnSide).toBe(true)
     expect(oneBROnOtherSide).toBe(true)
-    // And critically: studios and 1BRs are on opposite sides.
     const studioAvg = yStudio.reduce((s, v) => s + v, 0) / yStudio.length
     const oneBRAvg = yOneBR.reduce((s, v) => s + v, 0) / yOneBR.length
-    expect(Math.sign(studioAvg - 5)).not.toBe(Math.sign(oneBRAvg - 5))
+    expect(Math.sign(studioAvg - CY)).not.toBe(Math.sign(oneBRAvg - CY))
   })
 
   it("unitOrderingHeuristic 'mix-declared' (default) places in declared order", () => {
     const r = packUnits({
-      outline: OUTLINE_30x10,
-      corridor: corr(OUTLINE_30x10),
+      outline: OUTLINE_50x30,
+      corridor: corr(OUTLINE_50x30),
       corridorWidth: 1.5,
       unitMix: baseMix([
         { type: 'small', count: 2, targetArea: STRIP_DEPTH * 4 },
@@ -328,8 +341,8 @@ describe('packUnits — strategy + ordering', () => {
 
   it("unitOrderingHeuristic 'largest-first' sorts by descending targetArea", () => {
     const r = packUnits({
-      outline: OUTLINE_30x10,
-      corridor: corr(OUTLINE_30x10),
+      outline: OUTLINE_50x30,
+      corridor: corr(OUTLINE_50x30),
       corridorWidth: 1.5,
       unitMix: baseMix([
         { type: 'small', count: 2, targetArea: STRIP_DEPTH * 4 },
@@ -339,14 +352,13 @@ describe('packUnits — strategy + ordering', () => {
     })
     expect(r).not.toBeNull()
     if (!r) return
-    // 'big' (32 m²·factor) placed before 'small' (~17 m²·factor).
     expect(r.units[0]!.type).toBe('big')
   })
 
   it("unitOrderingHeuristic 'smallest-first' sorts by ascending targetArea", () => {
     const r = packUnits({
-      outline: OUTLINE_30x10,
-      corridor: corr(OUTLINE_30x10),
+      outline: OUTLINE_50x30,
+      corridor: corr(OUTLINE_50x30),
       corridorWidth: 1.5,
       unitMix: baseMix([
         { type: 'small', count: 2, targetArea: STRIP_DEPTH * 4 },
@@ -361,8 +373,8 @@ describe('packUnits — strategy + ordering', () => {
 
   it("strategy + ordering compose: largest-first + alternating", () => {
     const r = packUnits({
-      outline: OUTLINE_30x10,
-      corridor: corr(OUTLINE_30x10),
+      outline: OUTLINE_50x30,
+      corridor: corr(OUTLINE_50x30),
       corridorWidth: 1.5,
       unitMix: baseMix([
         { type: 'small', count: 2, targetArea: STRIP_DEPTH * 4 },

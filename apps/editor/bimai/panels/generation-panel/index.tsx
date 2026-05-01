@@ -220,14 +220,29 @@ function ResultSection({ result }: { result: GeneratorOutput }) {
         </div>
         {result.warnings.length > 0 && (
           <ul className="mt-1 flex flex-col gap-1">
-            {result.warnings.map((w, i) => (
-              <li
-                className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-amber-300 text-xs"
-                key={i}
-              >
-                {w}
-              </li>
-            ))}
+            {result.warnings.map((w, i) => {
+              // Phase 3-7 Fix A: strip the typed `code: ` prefix for the
+              // in-panel rendering — the codes are useful for log greps
+              // but noisy in the user-facing list. Suggestions are
+              // already part of the message body so they ride along.
+              const display = w.replace(
+                /^(unit_too_narrow_for_template|unit_widened_for_bisection|unit_clipped_max|plot_too_narrow|corridor_layout_failed|area_drift):\s*/,
+                '',
+              )
+              const isBlocking = w.startsWith('unit_too_narrow_for_template')
+              return (
+                <li
+                  className={
+                    isBlocking
+                      ? 'rounded border border-red-500/40 bg-red-500/10 px-2 py-1 text-red-300 text-xs'
+                      : 'rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-amber-300 text-xs'
+                  }
+                  key={i}
+                >
+                  {display}
+                </li>
+              )
+            })}
           </ul>
         )}
       </section>

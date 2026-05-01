@@ -25,6 +25,7 @@ import { computeEnvelope } from '../lib/envelope'
 import { calculatePolygonArea } from '../lib/geometry'
 import { withDefaults } from '../optimizer/params'
 import { findGeneratedNodes, findStaleLevelNodes } from './cleanup'
+import { traceGroup, traceGroupEnd, traceLog, traceWarn } from './debug'
 import { emitBuildingPlan } from './emit'
 import { applyBIMDefaults } from './stages/bim-defaults'
 import { placeCorridor } from './stages/corridor'
@@ -108,6 +109,18 @@ export function buildPlan(
   // every floor even though they're identical — this keeps the door open
   // for floor-specific variation later (e.g. stepped setbacks, ground-floor
   // commercial) without restructuring the loop.
+  // [BimAI Generation Trace] — opt-in pipeline diagnostic. Enable via
+  // `localStorage.bimai-debug = 'true'` in DevTools. Logs every stage
+  // so we can see exactly where the unit→room subdivision chain breaks
+  // for production-sized units. Off by default so the console stays
+  // quiet for normal users.
+  traceGroup('[BimAI Generation Trace]')
+  traceLog(
+    `input: plot ${plotArea.toFixed(0)}m², footprint ${calculatePolygonArea(
+      footprint.polygon,
+    ).toFixed(0)}m², floors ${floorsResult.floorCount}`,
+  )
+
   const floors: FloorPlan[] = []
   for (let i = 0; i < floorsResult.floorCount; i++) {
     const corridor = placeCorridor(footprint.polygon, {
@@ -141,7 +154,47 @@ export function buildPlan(
       warnings.push(...packed.warnings.map((w) => `floor ${i}: ${w}`))
     }
 
+    // [BimAI Generation Trace] — packer output
+    traceGroup(`STAGE: unit packer (floor ${i})`)
+    traceLog(`  corridor mode: ${corridor.mode}`)
+    traceLog(`  produced ${packed.units.length} units:`)
+    for (const u of packed.units) {
+      const xs = u.polygon.map((p) => p[0])
+      const ys = u.polygon.map((p) => p[1])
+      const w = Math.max(...xs) - Math.min(...xs)
+      const d = Math.max(...ys) - Math.min(...ys)
+      traceLog(
+        `    ${u.type} — area ${u.area.toFixed(1)}m², bbox ${w.toFixed(2)} × ${d.toFixed(2)} m`,
+      )
+    }
+    if (packed.warnings.length > 0) {
+      traceWarn(`  packer warnings:`, packed.warnings)
+    }
+    traceGroupEnd()
+
     const roomsAttached = attachRoomsToUnits(packed.units)
+    // [BimAI Generation Trace] — bisection results
+    traceGroup(`STAGE: bisection (floor ${i})`)
+    for (let k = 0; k < roomsAttached.units.length; k++) {
+      const u = roomsAttached.units[k]!
+      const kinds = (u.rooms ?? []).map((r) => r.kind)
+      const isShell = kinds.length === 1 && kinds[0] === 'unit-shell'
+      if (isShell) {
+        traceWarn(
+          `  unit ${k} (${u.type}, ${u.area.toFixed(1)}m²): FELL BACK to unit-shell`,
+        )
+      } else {
+        traceLog(
+          `  unit ${k} (${u.type}, ${u.area.toFixed(1)}m²): OK — ${kinds.length} rooms [${kinds.join(', ')}]`,
+        )
+      }
+    }
+    if (roomsAttached.warnings.length > 0) {
+      traceWarn(`  bisection warnings:`)
+      for (const w of roomsAttached.warnings) traceWarn(`    ${w}`)
+    }
+    traceGroupEnd()
+
     if (roomsAttached.warnings.length > 0) {
       warnings.push(
         ...roomsAttached.warnings.map((w) => `floor ${i}: ${w}`),
@@ -154,6 +207,9 @@ export function buildPlan(
       units: roomsAttached.units,
     })
   }
+  // [BimAI Generation Trace] — close pipeline group; emit-stage trace
+  // (room-zone op counts) is logged from emitBuildingPlan.
+  traceGroupEnd()
 
   // If the program demanded more capacity than zoning allows AND no units
   // could fit at all, escalate to a failure rather than ship an empty plan.

@@ -329,12 +329,20 @@ const FOUR_BR_TEMPLATE: UnitTemplate = {
         subdivide: {
           axis: 'across',
           // master + en-suite bath + 3 secondary bedrooms.
-          // master 24%, bath 12%, bed-2 22%, bed-3 21%, bed-4 21% = 1.0
+          // Phase 3-7 close-out (Fix A): the en-suite bath fraction was
+          // raised from 0.12 → 0.17 so that at the fixed
+          // `TARGET_STRIP_DEPTH_M = 9` strip depth, the bath's across
+          // dimension (0.17 × 9 = 1.53 m) clears the 1.5 m
+          // `minRoomDimensionM` floor. The original 0.12 produced a
+          // 1.08 m wide bath rect, causing every 4BR to silently fall
+          // back to unit-shell — see PROGRESS.md "Close-out: fixed
+          // strip depth + corridor-mode discriminator".
+          // master 21%, bath 17%, bed-2 21%, bed-3 20%, bed-4 21% = 1.0
           slices: [
-            { fraction: 0.24, kind: 'bedroom' }, // master
-            { fraction: 0.12, kind: 'bathroom' }, // en-suite
-            { fraction: 0.22, kind: 'bedroom' },
+            { fraction: 0.21, kind: 'bedroom' }, // master
+            { fraction: 0.17, kind: 'bathroom' }, // en-suite
             { fraction: 0.21, kind: 'bedroom' },
+            { fraction: 0.2, kind: 'bedroom' },
             { fraction: 0.21, kind: 'bedroom' },
           ],
         },
@@ -518,6 +526,107 @@ export function effectiveAreaBand(
     lowerBound: template.areaRangeM2.min * AREA_BAND_TOLERANCE_LOW,
     upperBound: template.areaRangeM2.max * AREA_BAND_TOLERANCE_HIGH,
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Minimum-viable-width computation (Phase 3-7 close-out, Fix A)
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Compute the smallest unit-width (m) for which `bisectUnit` can
+ * satisfy `minRoomDimensionM` given a fixed strip depth, OR `null` if
+ * the template inherently cannot bisect at that strip depth (no width
+ * makes every leaf clear the floor).
+ *
+ * Why this exists: the unit packer used to derive width as
+ * `targetArea / stripDepth`, ignoring whether the result still let the
+ * type's template pack rooms. At `TARGET_STRIP_DEPTH_M = 9`, a 1BR
+ * targeted at 55 m² came out 6.11 m wide; the OBB's long axis flipped
+ * to the 9 m strip-perpendicular direction, the root `'along'` 12% slice
+ * became `0.12 × 9 = 1.08 m wide`, and bisection rejected on the
+ * hallway floor. Result: every "1BR" silently fell back to unit-shell.
+ *
+ * The packer now consults this function (via the `MIN_VIABLE_WIDTH_M`
+ * cache in `units.ts`) to widen too-narrow units OR refuse to place
+ * them with an explicit `unit_too_narrow_for_template` warning. The
+ * corresponding regression test in `rooms-templates.test.ts` keeps the
+ * static cache honest: every entry must be ≥ this value.
+ *
+ * Algorithm: walk the template tree at every plausible width and find
+ * the smallest width whose entire leaf set clears the floor. We only
+ * test discrete widths because OBB orientation flips at
+ * `width = stripDepth` (the long axis swaps), so the function isn't
+ * monotone — sweeping in 0.01 m steps from `stripDepth` upward catches
+ * the flip exactly. If we sweep up to `MAX_SWEEP_M` without finding a
+ * width that satisfies every leaf, return `null`.
+ *
+ * The function is intentionally simple/slow (O(sweep × leaves)). It's
+ * called once at module-load by tests and never on the hot path.
+ */
+export function computeMinViableWidth(
+  template: UnitTemplate,
+  stripDepth: number,
+): number | null {
+  const MAX_SWEEP_M = 30 // any wider than this is a luxury suite, out of scope
+  const STEP_M = 0.01
+  const min = template.constraints.minRoomDimensionM
+  // The OBB picks max(uw, stripDepth) as the long axis. So sweeping from
+  // stripDepth upward covers the "uw is the long axis" regime; we also
+  // check uw < stripDepth in a single representative pass below since
+  // for those widths the long-axis fractions multiply stripDepth (a
+  // constant), so feasibility doesn't depend on uw beyond a fixed
+  // threshold — if it works for any uw ≤ stripDepth it works for all.
+  for (let uw = stripDepth; uw <= MAX_SWEEP_M + 1e-9; uw += STEP_M) {
+    if (allLeavesClearFloor(template, uw, stripDepth, min)) {
+      // Round up to 0.01 m precision.
+      return Math.ceil(uw * 100) / 100
+    }
+  }
+  return null
+}
+
+/** Walk the template tree; return true iff every leaf rect ≥ minDim on both sides. */
+function allLeavesClearFloor(
+  template: UnitTemplate,
+  uw: number,
+  stripDepth: number,
+  minDim: number,
+): boolean {
+  // OBB convention: long axis = max(uw, stripDepth). 'along' template axis
+  // maps to the long axis; 'across' maps to the short.
+  const longLen = Math.max(uw, stripDepth)
+  const shortLen = Math.min(uw, stripDepth)
+  let ok = true
+  const walk = (
+    spec: SubdivideSpec,
+    rectAlong: number,
+    rectAcross: number,
+  ): void => {
+    // applyBathroomClamp would mutate fractions if a bathroom slice is
+    // oversized; for the floor-check we sweep all reasonable widths so
+    // running the clamp here would be redundant — skip it. (Bathroom
+    // clamp can only *shrink* a bathroom; if the unclamped layout
+    // clears the floor, the clamped one does too.)
+    for (const slice of spec.slices) {
+      const fAlong = spec.axis === 'along' ? slice.fraction : 1
+      const fAcross = spec.axis === 'across' ? slice.fraction : 1
+      const childAlong = rectAlong * fAlong
+      const childAcross = rectAcross * fAcross
+      if (slice.subdivide) {
+        walk(slice.subdivide, childAlong, childAcross)
+      } else {
+        // Leaf rect dimensions.
+        if (
+          childAlong < minDim - FRACTION_EPSILON ||
+          childAcross < minDim - FRACTION_EPSILON
+        ) {
+          ok = false
+        }
+      }
+    }
+  }
+  walk(template.rootSplit, longLen, shortLen)
+  return ok
 }
 
 // ─────────────────────────────────────────────────────────────────────

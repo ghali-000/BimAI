@@ -9,12 +9,15 @@ import {
   type SubdivideSpec,
   type UnitTemplate,
   computeLeafAllocations,
+  computeMinViableWidth,
   getUnitTemplate,
   isAreaInBand,
   leafKinds,
   listUnitTemplates,
   validateTemplate,
 } from './rooms-templates'
+import { TARGET_STRIP_DEPTH_M } from './corridor'
+import { MIN_UNIT_WIDTH_M, MIN_VIABLE_WIDTH_M } from './units'
 
 // Note on scope: these tests cover the *template format* — structural
 // correctness, fraction sums, leaf/non-leaf invariants, and the
@@ -414,5 +417,67 @@ describe('validateTemplate', () => {
         }),
       ),
     ).not.toThrow()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────
+// Phase 3-7 close-out (Fix A) — MIN_VIABLE_WIDTH_M ≥ computed-from-template
+// ─────────────────────────────────────────────────────────────────────
+//
+// The packer keeps a static `MIN_VIABLE_WIDTH_M[type]` cache so the hot
+// path doesn't re-walk the template tree per unit. This describe block
+// guards against drift: if a template's fractions change such that a
+// type can now bisect at a smaller width than the cache claims, the
+// cache is *too lenient* (units that look fine to the packer would
+// fail bisection downstream). If the templates change such that the
+// cache is too low, the packer would emit `unit_too_narrow_for_template`
+// for units that *would* bisect — also a regression worth catching.
+//
+// Studio is intentionally registered at MIN_UNIT_WIDTH_M (the legacy
+// floor): the Studio template can't bisect at our 9 m strip depth and
+// always falls back to unit-shell. This test treats Studio as the
+// exemption; every other registered type must satisfy the inequality.
+
+describe('MIN_VIABLE_WIDTH_M ⇄ template fractions invariant', () => {
+  const STRIP_DEPTH = TARGET_STRIP_DEPTH_M
+
+  for (const t of listUnitTemplates()) {
+    if (t.unitType === 'Studio') {
+      it(`${t.unitType}: documented exemption (legacy floor passthrough, falls back to unit-shell at typical sizes)`, () => {
+        // Studio's exemption is "legacy floor passthrough": Studios in
+        // practice fall back to unit-shell because typical Studio widths
+        // (3–6 m) are below where the template can bisect. The packer
+        // only uses MIN_VIABLE_WIDTH_M to *widen or skip* candidates; for
+        // Studio we want neither — we want the legacy MIN_UNIT_WIDTH_M
+        // floor and the unit-shell fallback path. Pinning the constant to
+        // MIN_UNIT_WIDTH_M makes that explicit.
+        expect(MIN_VIABLE_WIDTH_M[t.unitType]).toBe(MIN_UNIT_WIDTH_M)
+      })
+      continue
+    }
+    it(`${t.unitType}: MIN_VIABLE_WIDTH_M[${t.unitType}] (${MIN_VIABLE_WIDTH_M[t.unitType]} m) ≥ computeMinViableWidth(${t.unitType}, ${STRIP_DEPTH})`, () => {
+      const computed = computeMinViableWidth(t, STRIP_DEPTH)
+      expect(computed).not.toBeNull()
+      if (computed === null) return
+      const cached = MIN_VIABLE_WIDTH_M[t.unitType]
+      expect(cached).toBeDefined()
+      // Cached value must be ≥ computed. If less, the packer's gate is
+      // too lenient — units that look bisectable to the packer would
+      // fail downstream and silently fall back to unit-shell.
+      expect(cached).toBeGreaterThanOrEqual(computed)
+    })
+  }
+
+  it('every cached entry except Studio rounds to whole metres for stable bisection at strip depth 9', () => {
+    // The packer reports the constraint to users in panel warnings as
+    // a whole number ("≥13 m wide"). Exact-decimal cache values would
+    // produce unfriendly messages like "≥12.5 m"; rounding up to the
+    // nearest metre keeps the message readable AND guarantees a
+    // small headroom margin against floating-point bisection edge cases.
+    for (const t of listUnitTemplates()) {
+      if (t.unitType === 'Studio') continue
+      const cached = MIN_VIABLE_WIDTH_M[t.unitType]!
+      expect(cached).toBe(Math.round(cached))
+    }
   })
 })

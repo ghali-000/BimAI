@@ -19,6 +19,33 @@ import type { CorridorPlan } from '../types'
 /** Default double-loaded corridor width, metres. */
 export const DEFAULT_CORRIDOR_WIDTH_M = 1.5
 
+/**
+ * Fixed strip depth (metres) for double-loaded corridors. Tuned from the
+ * 4BR room template's needs: that template's deepest room is ~5m × 5m,
+ * leaving 4m for the second row, which the area-band gate accommodates.
+ *
+ * Setting this *fixed* (rather than deriving `(shortLen − corridor) / 2`
+ * from the plot) is the Phase 3-7 close-out fix. The previous behaviour
+ * produced near-square 9m × 9m units on a 30×10 plate that the room-bisection
+ * algorithm could never bisect → every unit silently fell back to a
+ * single `unit-shell` room and zero room IfcSpaces appeared in the export.
+ *
+ * Trade-off: large plates (e.g. 30×30) now have an unused buffer between
+ * strips and the outer envelope. Templates bisect with rooms on every
+ * unit; the under-area drift at large templates (3BR ~81 m² instead of
+ * the 105 m² nominal) is documented in PROGRESS.md as accepted.
+ */
+export const TARGET_STRIP_DEPTH_M = 9
+
+/**
+ * Minimum strip depth to attempt single-loaded fallback. Below this the
+ * plate is too narrow for any habitable unit and we return null with a
+ * `plot_too_narrow` warning instead. Mirrors `MIN_UNIT_WIDTH_M` from the
+ * units stage (4 m) — by symmetry, no axis of a unit should fall below
+ * 4 m or the room-bisection bathroom split fails its 1.5 m floor check.
+ */
+export const MIN_STRIP_DEPTH_M = 4
+
 /** Tolerance for "right angle" and "equal length" checks on rectangle detection. */
 const RECTANGLE_TOLERANCE = 1e-3
 
@@ -50,24 +77,39 @@ export function placeCorridor(
   // to one of the two rectangle axes; "long" / "short" name which.
   const orientation = options.orientation ?? 'long-axis'
   const useShort = orientation === 'short-axis'
-  // 'auto': pick whichever leaves more habitable strip depth on each side.
-  // Strip depth is (perpendicular − corridorWidth) / 2; the longer of the
-  // two perpendicular spans wins. With a width-perpendicular short axis
-  // this is the long span, and with a long-axis corridor it's the short
-  // span — which is why long-axis is the standard residential default.
-  // The 'auto' branch flips when the rectangle is closer to square.
+  // 'auto': pick whichever leaves more habitable strip depth. Whichever
+  // perpendicular span has more headroom for a TARGET_STRIP_DEPTH_M strip
+  // wins; tie → long-axis (residential default).
   let runShort = useShort
   if (orientation === 'auto') {
-    // Compare strip-depth feasibility on each axis. Whichever has more
-    // depth-after-corridor wins; tie → long-axis.
-    const longAxisStripDepth = (rect.shortLen - width) / 2
-    const shortAxisStripDepth = (rect.longLen - width) / 2
-    runShort = shortAxisStripDepth > longAxisStripDepth
+    const longAxisUsable = rect.shortLen - width
+    const shortAxisUsable = rect.longLen - width
+    runShort = shortAxisUsable > longAxisUsable
+  }
+
+  // Perpendicular dimension (the axis we partition into corridor + strip(s)).
+  const perpendicular = runShort ? rect.longLen : rect.shortLen
+  const usable = perpendicular - width
+
+  // Strip-count + mode decision. Fixed `TARGET_STRIP_DEPTH_M` is the
+  // designed depth; we go double-loaded only when two of those plus the
+  // corridor fit, otherwise fall back to a single strip with whatever
+  // depth the residual offers. See PROGRESS.md Phase 3-7 close-out.
+  let mode: 'double-loaded' | 'single-loaded'
+  let stripDepth: number
+  if (usable >= 2 * TARGET_STRIP_DEPTH_M) {
+    mode = 'double-loaded'
+    stripDepth = TARGET_STRIP_DEPTH_M
+  } else if (usable >= MIN_STRIP_DEPTH_M) {
+    mode = 'single-loaded'
+    stripDepth = usable
+  } else {
+    // Plate is too narrow even for a single habitable strip. Caller turns
+    // this into a `plot_too_narrow` warning + corridor_layout_failed.
+    return null
   }
 
   // Direction the corridor runs along (u), and perpendicular (p).
-  // Default — 'long-axis': u = longDir, run length = longLen.
-  // 'short-axis' (or 'auto' picked it): u = shortDir, run length = shortLen.
   const ux = runShort ? -rect.longDir[1] : rect.longDir[0]
   const uy = runShort ? rect.longDir[0] : rect.longDir[1]
   const runHalf = runShort ? rect.shortLen / 2 : rect.longLen / 2
@@ -77,8 +119,17 @@ export function placeCorridor(
   const px = -uy
   const py = ux
 
-  const cx = rect.center[0]
-  const cy = rect.center[1]
+  // Centerline location:
+  //   double-loaded → centred on the rectangle (perpendicular offset 0).
+  //   single-loaded → offset toward the −perpendicular outline edge so
+  //                   the corridor hugs that edge; the lone habitable
+  //                   strip occupies the +perpendicular side.
+  // For single-loaded, offset = halfPerpendicular − corridorHalf, i.e.
+  // the corridor centerline sits exactly corridorHalf from the −p edge.
+  const halfPerp = perpendicular / 2
+  const perpOffset = mode === 'single-loaded' ? -(halfPerp - half) : 0
+  const cx = rect.center[0] + perpOffset * px
+  const cy = rect.center[1] + perpOffset * py
 
   const start: Point2D = [cx - ux * runHalf, cy - uy * runHalf]
   const end: Point2D = [cx + ux * runHalf, cy + uy * runHalf]
@@ -90,12 +141,10 @@ export function placeCorridor(
     [start[0] - px * half, start[1] - py * half],
   ]
 
-  const perpendicular = runShort ? rect.longLen : rect.shortLen
-  const stripDepth = (perpendicular - width) / 2
-
   return {
     polygon,
     centerline: [start, end],
+    mode,
     runLength: 2 * runHalf,
     stripDepth,
   }

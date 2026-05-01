@@ -139,9 +139,33 @@ export interface RoomPlan {
   windowAccess: boolean
 }
 
+/**
+ * How the corridor partitions the floor plate into habitable strips.
+ *
+ *   - `'double-loaded'`: corridor runs through the floor centre with units
+ *     flanking on both sides. Two strips. The canonical efficient layout
+ *     and what residential plans default to whenever the perpendicular
+ *     dimension can fit two TARGET_STRIP_DEPTH_M strips plus the corridor.
+ *   - `'single-loaded'`: corridor hugs one outline edge with a single
+ *     habitable strip on the other side. Used as the fallback for plates
+ *     too narrow for double-loaded — keeps units present (and bisecting)
+ *     instead of degrading to "no units placed at all". Half the unit
+ *     count per floor; the strip is whatever depth the leftover offers.
+ *
+ * The packer reads this to decide how many strips to place units in.
+ */
+export type CorridorMode = 'double-loaded' | 'single-loaded'
+
 export interface CorridorPlan {
   polygon: [number, number][]
   centerline: [[number, number], [number, number]]
+  /**
+   * Which side of the centerline the strip(s) occupy. `'double-loaded'`
+   * fills both sides; `'single-loaded'` fills only the +perpendicular
+   * side (the corridor edge then coincides with the −perpendicular
+   * outline edge).
+   */
+  mode: CorridorMode
   /**
    * Corridor run length (parallel to centerline). Equals `longLen` when
    * orientation is 'long-axis', `shortLen` when 'short-axis'. The unit
@@ -151,8 +175,11 @@ export interface CorridorPlan {
    */
   runLength?: number
   /**
-   * Strip depth on each side of the corridor — perpendicular distance
-   * from corridor edge to outline edge. Equals `(perpendicular − width)/2`.
+   * Strip depth perpendicular to the corridor. For `'double-loaded'` this
+   * is the depth of *each* of the two flanking strips (fixed at
+   * `TARGET_STRIP_DEPTH_M` once the plate fits two strips + corridor).
+   * For `'single-loaded'` this is the depth of the lone strip (whatever
+   * `shortLen − corridorWidth` resolves to — capped at TARGET_STRIP_DEPTH_M).
    */
   stripDepth?: number
 }

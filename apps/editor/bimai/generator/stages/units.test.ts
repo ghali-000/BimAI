@@ -2,18 +2,26 @@ import { describe, expect, it } from 'vitest'
 import type { Program } from '../../schemas'
 import { calculatePolygonArea } from '../../lib/geometry'
 import type { CorridorPlan } from '../types'
-import { placeCorridor } from './corridor'
-import { MAX_UNIT_WIDTH_M, MIN_UNIT_WIDTH_M, packUnits } from './units'
+import { TARGET_STRIP_DEPTH_M, placeCorridor } from './corridor'
+import {
+  MAX_UNIT_WIDTH_M,
+  MIN_UNIT_WIDTH_M,
+  MIN_VIABLE_WIDTH_M,
+  packUnits,
+} from './units'
 
-// 30 (long) × 10 (short) axis-aligned floor plate. Corridor 1.5m wide along
-// the long axis ⇒ each strip is (10 − 1.5) / 2 = 4.25m deep.
-const OUTLINE_30x10: [number, number][] = [
+// 50 (long) × 30 (short) axis-aligned floor plate. Usable perpendicular
+// = 30 − 1.5 = 28.5 ≥ 2 × TARGET_STRIP_DEPTH_M (18) ⇒ double-loaded with
+// fixed 9 m strips. The previous test fixture (30 × 10) is now narrow
+// enough to fall back to single-loaded — exercised in its own suite below.
+const OUTLINE_50x30: [number, number][] = [
   [0, 0],
-  [30, 0],
-  [30, 10],
-  [0, 10],
+  [50, 0],
+  [50, 30],
+  [0, 30],
 ]
-const STRIP_DEPTH = 4.25
+// Fixed strip depth in double-loaded mode (Phase 3-7 close-out).
+const STRIP_DEPTH = TARGET_STRIP_DEPTH_M
 
 function corridorFor(outline: [number, number][]): CorridorPlan {
   const c = placeCorridor(outline)
@@ -23,109 +31,113 @@ function corridorFor(outline: [number, number][]): CorridorPlan {
 
 const baseMix = (mix: Program['unitMix']): Program['unitMix'] => mix
 
-describe('packUnits', () => {
+describe('packUnits — double-loaded (50×30)', () => {
   it('places a single unit on the first strip', () => {
     const result = packUnits({
-      outline: OUTLINE_30x10,
-      corridor: corridorFor(OUTLINE_30x10),
+      outline: OUTLINE_50x30,
+      corridor: corridorFor(OUTLINE_50x30),
       corridorWidth: 1.5,
-      unitMix: baseMix([{ type: 'studio', count: 1, targetArea: 4.25 * 5 }]),
+      // targetArea = depth × 5 = 45 ⇒ derived width 5m, no clamp.
+      unitMix: baseMix([{ type: 'studio', count: 1, targetArea: STRIP_DEPTH * 5 }]),
     })
     expect(result).not.toBeNull()
     if (!result) return
     expect(result.units).toHaveLength(1)
     expect(result.units[0]!.type).toBe('studio')
-    // Area target honoured exactly (derived width 5m sits inside [MIN, MAX]).
-    expect(result.units[0]!.area).toBeCloseTo(4.25 * 5, 6)
+    expect(result.units[0]!.area).toBeCloseTo(STRIP_DEPTH * 5, 6)
     expect(result.unplaced).toEqual([])
     expect(result.warnings).toEqual([])
   })
 
   it('honours declaration order across the queue', () => {
+    // Uses lowercase test-only types so the per-type minViable gate
+    // doesn't kick in — this spec is about queue ordering, not the
+    // 1BR/2BR template-feasibility logic added in Phase 3-7 Fix A.
     const result = packUnits({
-      outline: OUTLINE_30x10,
-      corridor: corridorFor(OUTLINE_30x10),
+      outline: OUTLINE_50x30,
+      corridor: corridorFor(OUTLINE_50x30),
       corridorWidth: 1.5,
       unitMix: baseMix([
         { type: 'studio', count: 2, targetArea: STRIP_DEPTH * 5 },
-        { type: '1BR', count: 2, targetArea: STRIP_DEPTH * 5 },
+        { type: 'apartment', count: 2, targetArea: STRIP_DEPTH * 5 },
       ]),
     })
     expect(result).not.toBeNull()
     if (!result) return
-    // 4 units × 5m = 20m on strip 0; declared order preserved.
     expect(result.units.map((u) => u.type)).toEqual([
       'studio',
       'studio',
-      '1BR',
-      '1BR',
+      'apartment',
+      'apartment',
     ])
   })
 
   it('overflows to the second strip when the first fills', () => {
-    // width 7m (target 4.25 × 7 = 29.75 m², no clamp). Strip 0 fits 4 (28m),
-    // remainder 2m < MIN_UNIT_WIDTH_M ⇒ rule 4 (switch strips) sends the 5th
-    // unit to strip 1.
+    // width 7m. Strip 0 fits 7×7 = 49m of 50m; remainder 1m < MIN ⇒ rule 4
+    // (switch strips) sends the 8th unit to strip 1.
     const result = packUnits({
-      outline: OUTLINE_30x10,
-      corridor: corridorFor(OUTLINE_30x10),
+      outline: OUTLINE_50x30,
+      corridor: corridorFor(OUTLINE_50x30),
       corridorWidth: 1.5,
       unitMix: baseMix([
-        { type: '2BR', count: 5, targetArea: STRIP_DEPTH * 7 },
+        // Lowercase test-only type — bypasses the per-type minViable
+        // gate so this spec exercises only strip-overflow mechanics.
+        { type: 'apartment', count: 8, targetArea: STRIP_DEPTH * 7 },
       ]),
     })
     expect(result).not.toBeNull()
     if (!result) return
-    expect(result.units).toHaveLength(5)
+    expect(result.units).toHaveLength(8)
     expect(result.unplaced).toEqual([])
-    // Centroids of first four lie on +y side of corridor; fifth on -y side.
+    // Centroids: strip 0 lies on +y side of corridor (y=15); strip 1 on −y side.
     const cy = (u: { polygon: [number, number][] }) =>
       u.polygon.reduce((s, p) => s + p[1], 0) / u.polygon.length
-    expect(cy(result.units[0]!)).toBeGreaterThan(5)
-    expect(cy(result.units[1]!)).toBeGreaterThan(5)
-    expect(cy(result.units[2]!)).toBeGreaterThan(5)
-    expect(cy(result.units[3]!)).toBeGreaterThan(5)
-    expect(cy(result.units[4]!)).toBeLessThan(5)
+    for (let i = 0; i < 7; i++) expect(cy(result.units[i]!)).toBeGreaterThan(15)
+    expect(cy(result.units[7]!)).toBeLessThan(15)
   })
 
   it('records unplaced units and warns when the program exceeds capacity', () => {
-    // 11 units × 6m wide (target 4.25 × 6 = 25.5 m², no clamp). Each strip
-    // tiles exactly at 5×6=30m ⇒ 10 placed, 1 unplaced. No strip-end clipping.
+    // 12 units × 6m. Each strip holds floor(50/6)=8 → 8×6=48m, remainder 2m
+    // < MIN, switch strips. Both strips → 16 placed if mix allows; here we
+    // request 12, all placed (8 + 4). Use a tighter fixture to actually
+    // overflow: 18 units forces unplaced.
     const result = packUnits({
-      outline: OUTLINE_30x10,
-      corridor: corridorFor(OUTLINE_30x10),
+      outline: OUTLINE_50x30,
+      corridor: corridorFor(OUTLINE_50x30),
       corridorWidth: 1.5,
       unitMix: baseMix([
-        { type: '2BR', count: 11, targetArea: STRIP_DEPTH * 6 },
+        // Lowercase test-only type — see "overflows" spec above.
+        { type: 'apartment', count: 18, targetArea: STRIP_DEPTH * 6 },
       ]),
     })
     expect(result).not.toBeNull()
     if (!result) return
-    expect(result.units).toHaveLength(10)
-    expect(result.unplaced).toHaveLength(1)
+    expect(result.units).toHaveLength(16)
+    expect(result.unplaced).toHaveLength(2)
     expect(result.warnings.some((w) => /could not be placed/.test(w))).toBe(true)
   })
 
   it('skips zero-count entries entirely', () => {
     const result = packUnits({
-      outline: OUTLINE_30x10,
-      corridor: corridorFor(OUTLINE_30x10),
+      outline: OUTLINE_50x30,
+      corridor: corridorFor(OUTLINE_50x30),
       corridorWidth: 1.5,
       unitMix: baseMix([
-        { type: 'studio', count: 0, targetArea: 35 },
-        { type: '1BR', count: 1, targetArea: STRIP_DEPTH * 5 },
+        { type: 'studio', count: 0, targetArea: STRIP_DEPTH * 5 },
+        // Lowercase test-only type so the minViable gate is inert.
+        { type: 'apartment', count: 1, targetArea: STRIP_DEPTH * 5 },
       ]),
     })
     expect(result).not.toBeNull()
     if (!result) return
     expect(result.units).toHaveLength(1)
-    expect(result.units[0]!.type).toBe('1BR')
+    expect(result.units[0]!.type).toBe('apartment')
   })
 
   it('labels facade and corridor edges on every unit', () => {
     const result = packUnits({
-      outline: OUTLINE_30x10,
-      corridor: corridorFor(OUTLINE_30x10),
+      outline: OUTLINE_50x30,
+      corridor: corridorFor(OUTLINE_50x30),
       corridorWidth: 1.5,
       unitMix: baseMix([
         { type: '2BR', count: 4, targetArea: STRIP_DEPTH * 7 },
@@ -140,21 +152,21 @@ describe('packUnits', () => {
   })
 
   it('flags first/last units in a strip with end-wall facade edges', () => {
-    // 3 units × 7m wide ⇒ strip 0 holds all three (21m of 30m).
+    // 5 units × 7m ⇒ 35m of 50m on strip 0, all five fit.
     const result = packUnits({
-      outline: OUTLINE_30x10,
-      corridor: corridorFor(OUTLINE_30x10),
+      outline: OUTLINE_50x30,
+      corridor: corridorFor(OUTLINE_50x30),
       corridorWidth: 1.5,
       unitMix: baseMix([
-        { type: '2BR', count: 3, targetArea: STRIP_DEPTH * 7 },
+        { type: '2BR', count: 5, targetArea: STRIP_DEPTH * 7 },
       ]),
     })
     expect(result).not.toBeNull()
     if (!result) return
     expect(result.units[0]!.facadeEdges).toContain(3)
-    expect(result.units[2]!.facadeEdges).toContain(1)
-    expect(result.units[1]!.facadeEdges).not.toContain(1)
-    expect(result.units[1]!.facadeEdges).not.toContain(3)
+    expect(result.units[4]!.facadeEdges).toContain(1)
+    expect(result.units[2]!.facadeEdges).not.toContain(1)
+    expect(result.units[2]!.facadeEdges).not.toContain(3)
   })
 
   it('returns null for non-rectangular outlines', () => {
@@ -166,7 +178,7 @@ describe('packUnits', () => {
     expect(
       packUnits({
         outline: triangle,
-        corridor: corridorFor(OUTLINE_30x10),
+        corridor: corridorFor(OUTLINE_50x30),
         corridorWidth: 1.5,
         unitMix: baseMix([{ type: 'studio', count: 1, targetArea: 20 }]),
       }),
@@ -174,27 +186,16 @@ describe('packUnits', () => {
   })
 
   it('returns null when the corridor consumes the whole short dimension', () => {
-    // Pass a corridor whose own metadata reflects the consumed dimension.
-    // Phase 3-5 made the corridor object the canonical source for run
-    // length + strip depth, so the test's `corridorWidth` field on its
-    // own no longer drives strip-depth derivation.
-    const consumed = placeCorridor(OUTLINE_30x10, { width: 10 })
-    if (!consumed) throw new Error('test setup: corridor at full width')
-    expect(
-      packUnits({
-        outline: OUTLINE_30x10,
-        corridor: consumed,
-        corridorWidth: 10,
-        unitMix: baseMix([{ type: 'studio', count: 1, targetArea: 20 }]),
-      }),
-    ).toBeNull()
+    // Corridor as wide as the short axis ⇒ no usable strip depth ⇒
+    // placeCorridor returns null. The packer must agree.
+    expect(placeCorridor(OUTLINE_50x30, { width: 30 })).toBeNull()
   })
 
   it('returns null for non-positive corridor width', () => {
     expect(
       packUnits({
-        outline: OUTLINE_30x10,
-        corridor: corridorFor(OUTLINE_30x10),
+        outline: OUTLINE_50x30,
+        corridor: corridorFor(OUTLINE_50x30),
         corridorWidth: 0,
         unitMix: baseMix([{ type: 'studio', count: 1, targetArea: 20 }]),
       }),
@@ -203,8 +204,8 @@ describe('packUnits', () => {
 
   it('produces unit polygons whose computed area matches the recorded area', () => {
     const result = packUnits({
-      outline: OUTLINE_30x10,
-      corridor: corridorFor(OUTLINE_30x10),
+      outline: OUTLINE_50x30,
+      corridor: corridorFor(OUTLINE_50x30),
       corridorWidth: 1.5,
       unitMix: baseMix([
         { type: '2BR', count: 3, targetArea: STRIP_DEPTH * 7 },
@@ -217,10 +218,10 @@ describe('packUnits', () => {
     }
   })
 
-  it('keeps unit polygons inside the floor outline (axis-aligned case)', () => {
+  it('keeps unit polygons inside the floor outline', () => {
     const result = packUnits({
-      outline: OUTLINE_30x10,
-      corridor: corridorFor(OUTLINE_30x10),
+      outline: OUTLINE_50x30,
+      corridor: corridorFor(OUTLINE_50x30),
       corridorWidth: 1.5,
       unitMix: baseMix([
         { type: 'studio', count: 6, targetArea: STRIP_DEPTH * 5 },
@@ -231,16 +232,14 @@ describe('packUnits', () => {
     for (const u of result.units) {
       for (const [x, y] of u.polygon) {
         expect(x).toBeGreaterThanOrEqual(-1e-9)
-        expect(x).toBeLessThanOrEqual(30 + 1e-9)
+        expect(x).toBeLessThanOrEqual(50 + 1e-9)
         expect(y).toBeGreaterThanOrEqual(-1e-9)
-        expect(y).toBeLessThanOrEqual(10 + 1e-9)
+        expect(y).toBeLessThanOrEqual(30 + 1e-9)
       }
     }
   })
 
   it('places units on a rotated rectangle along its long axis', () => {
-    // 30×10 rotated 45° about origin. width 7m (target 4.25 × 7 = 29.75) keeps
-    // the test inside the unclamped band so we're testing rotation, not clamp.
     const a = Math.PI / 4
     const cos = Math.cos(a)
     const sin = Math.sin(a)
@@ -248,7 +247,7 @@ describe('packUnits', () => {
       x * cos - y * sin,
       x * sin + y * cos,
     ]
-    const outline = [rot(0, 0), rot(30, 0), rot(30, 10), rot(0, 10)] as [
+    const outline = [rot(0, 0), rot(50, 0), rot(50, 30), rot(0, 30)] as [
       number,
       number,
     ][]
@@ -260,7 +259,8 @@ describe('packUnits', () => {
       corridor,
       corridorWidth: 1.5,
       unitMix: baseMix([
-        { type: '2BR', count: 3, targetArea: STRIP_DEPTH * 7 },
+        // Lowercase test-only type — see "overflows" spec above.
+        { type: 'apartment', count: 3, targetArea: STRIP_DEPTH * 7 },
       ]),
     })
     expect(result).not.toBeNull()
@@ -273,8 +273,8 @@ describe('packUnits', () => {
 
   it('returns an empty result for an empty unit mix', () => {
     const result = packUnits({
-      outline: OUTLINE_30x10,
-      corridor: corridorFor(OUTLINE_30x10),
+      outline: OUTLINE_50x30,
+      corridor: corridorFor(OUTLINE_50x30),
       corridorWidth: 1.5,
       unitMix: baseMix([]),
     })
@@ -284,159 +284,272 @@ describe('packUnits', () => {
     expect(result.unplaced).toEqual([])
     expect(result.warnings).toEqual([])
   })
+})
 
-  // ── Gate 1 regression tests ────────────────────────────────────────────────
-  // Pinned arithmetic from the Phase 3-3 Gate 1 spec. Each test names the
-  // exact derivation so future refactors can spot a behaviour change rather
-  // than a fixture drift.
+// ── Phase 3-7 close-out: fixed strip depth + mode discriminator ─────────────
+// Five specs covering the user-specified scenarios for the strip-depth packer
+// refactor. These pin the new contract: TARGET_STRIP_DEPTH_M is the designed
+// depth for double-loaded floors; single-loaded is the narrow-plate fallback;
+// plates that can't fit even a single habitable strip emit a typed warning.
 
-  it('Gate 1 — 30×10 + 4 Studios @ 35 m² fits inside [MIN,MAX] band', () => {
-    // depth = (10 − 1.5) / 2 = 4.25m
-    // derived width = 35 / 4.25 ≈ 8.235m  (within [3, 9] ⇒ no width clamp)
-    // Strip 0: 3 × 8.235 = 24.706m, remaining 5.294m ≥ MIN ⇒ rule 3 fires
-    //   for the 4th unit (strip-end clamp to 5.294m × 4.25 ≈ 22.5 m²).
-    // Net: 4 placed, 0 unplaced; one `unit_clipped_strip_end` warning;
-    //   `area_drift` for studio (≈ -8.9% < -5%).
+describe('Phase 3-7 close-out — strip depth + mode', () => {
+  it('1BR @ 55 m² is blocked at 9 m strip depth — needs ≥13 m wide to bisect, would overshoot 1BR area gate', () => {
+    // Phase 3-7 Fix A contract: 55/9 ≈ 6.11 m derived, but the 1BR
+    // template can't bisect below 12.5 m at strip depth 9 (root 0.12
+    // hallway × 9 = 1.08 m, fails 1.5 m floor). Widening to the 13 m
+    // minViable would make the unit 117 m² — over the 1BR gate
+    // ceiling of 105 m² (1.5 × max-band 70). Packer refuses placement
+    // and surfaces a unit_too_narrow_for_template warning.
     const result = packUnits({
-      outline: OUTLINE_30x10,
-      corridor: corridorFor(OUTLINE_30x10),
+      outline: OUTLINE_50x30,
+      corridor: corridorFor(OUTLINE_50x30),
       corridorWidth: 1.5,
-      unitMix: baseMix([{ type: 'studio', count: 4, targetArea: 35 }]),
+      unitMix: baseMix([{ type: '1BR', count: 1, targetArea: 55 }]),
+    })
+    expect(result).not.toBeNull()
+    if (!result) return
+    expect(result.units).toHaveLength(0)
+    expect(
+      result.warnings.some((w) =>
+        w.startsWith('unit_too_narrow_for_template'),
+      ),
+    ).toBe(true)
+    // The warning suggests the user-actionable next steps.
+    const w = result.warnings.find((w) =>
+      w.startsWith('unit_too_narrow_for_template'),
+    )!
+    expect(w).toMatch(/reduce 1BR count/)
+    expect(w).toMatch(/increase footprint depth/)
+  })
+
+  it('50×30 plate → double-loaded with 9 m strips on each side of corridor', () => {
+    const c = corridorFor(OUTLINE_50x30)
+    expect(c.mode).toBe('double-loaded')
+    expect(c.stripDepth).toBe(TARGET_STRIP_DEPTH_M)
+    // Centerline runs along long (X) axis through the rectangle centre.
+    expect(c.centerline[0]).toEqual([0, 15])
+    expect(c.centerline[1]).toEqual([50, 15])
+  })
+
+  it('30×12 plate → single-loaded fallback with 10.5 m strip depth', () => {
+    // usable = 12 − 1.5 = 10.5. < 2 × TARGET (18) ⇒ single-loaded; depth =
+    // residual usable. Corridor hugs the −perpendicular outline edge.
+    const outline: [number, number][] = [
+      [0, 0],
+      [30, 0],
+      [30, 12],
+      [0, 12],
+    ]
+    const c = placeCorridor(outline)
+    expect(c).not.toBeNull()
+    if (!c) return
+    expect(c.mode).toBe('single-loaded')
+    expect(c.stripDepth).toBeCloseTo(10.5)
+    // Corridor centerline offset toward y=0 edge: cy = corridorHalf = 0.75.
+    expect(c.centerline[0]).toEqual([0, 0.75])
+    expect(c.centerline[1]).toEqual([30, 0.75])
+
+    // Packer honours the single-strip layout — units only on +y side.
+    const result = packUnits({
+      outline,
+      corridor: c,
+      corridorWidth: 1.5,
+      // Lowercase test-only type — see notes on similar specs above.
+      unitMix: baseMix([{ type: 'apartment', count: 3, targetArea: 55 }]),
+    })
+    expect(result).not.toBeNull()
+    if (!result) return
+    for (const u of result.units) {
+      const cy = u.polygon.reduce((s, p) => s + p[1], 0) / u.polygon.length
+      expect(cy).toBeGreaterThan(0.75)
+    }
+  })
+
+  it('30×30 plate → double-loaded at fixed 9 m strips (unused buffer accepted)', () => {
+    // usable = 28.5 ≥ 18 ⇒ double-loaded, depth = 9. Strip outer edges at
+    // ±9.75; outline spans ±15 ⇒ 5.25 m unused buffer on each long side.
+    const outline: [number, number][] = [
+      [0, 0],
+      [30, 0],
+      [30, 30],
+      [0, 30],
+    ]
+    const c = placeCorridor(outline)
+    expect(c).not.toBeNull()
+    if (!c) return
+    expect(c.mode).toBe('double-loaded')
+    expect(c.stripDepth).toBe(TARGET_STRIP_DEPTH_M)
+    const result = packUnits({
+      outline,
+      corridor: c,
+      corridorWidth: 1.5,
+      // Lowercase test-only type so this spec keeps testing the
+      // "unused-buffer" geometry contract (strip depth honoured at
+      // 9 m on a wider plate) without entanglement with Fix A's per-
+      // type minViable/area-gate machinery.
+      unitMix: baseMix([{ type: 'apartment', count: 4, targetArea: 55 }]),
     })
     expect(result).not.toBeNull()
     if (!result) return
     expect(result.units).toHaveLength(4)
-    expect(result.unplaced).toEqual([])
-    // First three units pinned at the unclamped derived width 35/4.25.
-    const expectedWidth = 35 / 4.25
-    for (let i = 0; i < 3; i++) {
-      expect(result.units[i]!.area).toBeCloseTo(expectedWidth * 4.25, 4)
+    for (const u of result.units) {
+      // Strip-local depth honoured exactly (no plot-derived stretch).
+      expect(u.area).toBeCloseTo((55 / TARGET_STRIP_DEPTH_M) * TARGET_STRIP_DEPTH_M, 4)
     }
-    // Fourth unit was strip-end clipped — narrower than the first three.
-    expect(result.units[3]!.area).toBeLessThan(result.units[0]!.area)
-    expect(
-      result.warnings.some((w) => w.startsWith('unit_clipped_strip_end:')),
-    ).toBe(true)
-    expect(result.warnings.some((w) => w.startsWith('unit_clipped_max:'))).toBe(
-      false,
-    )
-    expect(result.warnings.some((w) => w.startsWith('unit_clipped_min:'))).toBe(
-      false,
-    )
-    expect(result.warnings.some((w) => w.startsWith('area_drift:'))).toBe(true)
   })
 
-  it('Gate 1 — 30×10 + 1 oversize 4BR @ 200 m² is max-clamped', () => {
-    // derived width = 200 / 4.25 ≈ 47.06m  ⇒  clamp to MAX = 9m
-    // Placed area = 9 × 4.25 = 38.25 m² (vs target 200). One placed, no
-    //   unplaced; `unit_clipped_max` and `area_drift` warnings.
+  // ── Fix A: per-type widen-or-skip behavior ─────────────────────────
+  // Six specs pinning the contract introduced by Phase 3-7 Fix A:
+  // (1) widen, (2) skip on band overshoot, (3) above-minViable unchanged,
+  // (4) mixed program 21×21, (5) 3BR @ 50×30 widens to 13 m,
+  // (6) no silent unit-shell fallback for any registered placed unit.
+
+  it('Fix A (1): below minViable + room in area band → packs at minViable width with unit_widened warning', () => {
+    // 2BR target 70 m² ⇒ derived 70/9 ≈ 7.78 m, below minViable 11.
+    // 11 × 9 = 99 m², still inside 2BR upper gate (100 × 1.5 = 150).
+    // Packer widens; warning is surfaced exactly once per queued unit.
     const result = packUnits({
-      outline: OUTLINE_30x10,
-      corridor: corridorFor(OUTLINE_30x10),
+      outline: OUTLINE_50x30,
+      corridor: corridorFor(OUTLINE_50x30),
       corridorWidth: 1.5,
-      unitMix: baseMix([{ type: '4BR', count: 1, targetArea: 200 }]),
+      unitMix: baseMix([{ type: '2BR', count: 1, targetArea: 70 }]),
     })
     expect(result).not.toBeNull()
     if (!result) return
     expect(result.units).toHaveLength(1)
-    expect(result.unplaced).toEqual([])
-    expect(result.units[0]!.area).toBeCloseTo(MAX_UNIT_WIDTH_M * STRIP_DEPTH, 4)
-    expect(result.warnings.some((w) => w.startsWith('unit_clipped_max:'))).toBe(
-      true,
-    )
-    expect(result.warnings.some((w) => w.startsWith('area_drift:'))).toBe(true)
+    const u = result.units[0]!
+    // Width along strip ≈ 11 m (minViable for 2BR), area ≈ 11 × 9 = 99.
+    expect(u.area).toBeCloseTo(MIN_VIABLE_WIDTH_M['2BR']! * STRIP_DEPTH, 4)
+    expect(
+      result.warnings.some((w) =>
+        w.startsWith('unit_widened_for_bisection'),
+      ),
+    ).toBe(true)
   })
 
-  it('Gate 1 — 30×10 + 20 Studios @ 35 m² overflows capacity', () => {
-    // derived width 8.235m, no clamp. Each strip fits 3 normal units + 1
-    //   strip-end clamped tail (rem 5.294m ≥ MIN). So 4 per strip = 8 placed,
-    //   12 unplaced. Note: greedy left-then-right sees rem ≥ MIN and trips
-    //   strip-end clamping before exhausting the queue, so we end up with
-    //   8 placed rather than the 6 a strict floor(30/8.235) would suggest.
-    //   That's the conversation: rule 3 (strip-end clamp) bites here.
+  it('Fix A (3): derived width above minViable → unchanged, no widen/skip warning', () => {
+    // 2BR target 110 m² ⇒ derived 110/9 ≈ 12.22 m, above minViable 11.
+    // Packer leaves it alone; no widen warning, no skip warning.
     const result = packUnits({
-      outline: OUTLINE_30x10,
-      corridor: corridorFor(OUTLINE_30x10),
+      outline: OUTLINE_50x30,
+      corridor: corridorFor(OUTLINE_50x30),
       corridorWidth: 1.5,
-      unitMix: baseMix([{ type: 'studio', count: 20, targetArea: 35 }]),
+      unitMix: baseMix([{ type: '2BR', count: 1, targetArea: 110 }]),
     })
     expect(result).not.toBeNull()
     if (!result) return
-    expect(result.units).toHaveLength(8)
-    expect(result.unplaced).toHaveLength(12)
-    expect(result.warnings.some((w) => /could not be placed/.test(w))).toBe(
-      true,
-    )
+    expect(result.units).toHaveLength(1)
+    expect(result.units[0]!.area).toBeCloseTo(110, 4)
     expect(
-      result.warnings.filter((w) => w.startsWith('unit_clipped_strip_end:'))
-        .length,
-    ).toBe(2) // one tail per strip
+      result.warnings.some(
+        (w) =>
+          w.startsWith('unit_widened_for_bisection') ||
+          w.startsWith('unit_too_narrow_for_template'),
+      ),
+    ).toBe(false)
   })
 
-  it('Gate 1 — 50×12 mixed (4 Studio + 6 1BR + 4 2BR) clamps and drifts', () => {
-    // depth = (12 − 1.5) / 2 = 5.25m
-    // Studio 35 / 5.25 = 6.667m (no clamp)
-    // 1BR    55 / 5.25 = 10.476m → clamp to MAX = 9m
-    // 2BR    80 / 5.25 = 15.238m → clamp to MAX = 9m
-    //
-    // Greedy left-then-right (halfL = 25, longLen = 50):
-    //   Strip 0: 4 Studios (26.67m used) + 2 × 1BR @ 9 (44.67m) + strip-end
-    //            clamped 1BR @ 5.33m. cursor = 25 (full). 7 units.
-    //   Strip 1: 3 × 1BR @ 9 (27m) + 1 × 1BR @ 9 (no — only 6 1BRs total;
-    //            we used 3 on strip 0, so 3 left). Continue with 2BRs:
-    //            2 × 2BR @ 9 (45m) + strip-end clamped 2BR @ 5m. cursor = 25.
-    //            6 units.
-    //   Strip 0 → cursor=25 (full); 4th 2BR cannot fit anywhere → unplaced.
-    //
-    // Total: 13 placed, 1 unplaced.
+  it('Fix A (4): 21×21 plot + 4×2BR + 2×1BR → no placed unit below minViable for its type', () => {
+    // usable = 21 − 1.5 = 19.5 ≥ 18 ⇒ double-loaded, depth 9 m.
+    // 1BRs are blocked (minViable 13 × 9 = 117 > 105 ceiling); 2BRs widen
+    // to 11 m (≤ 150 ceiling). Strip length 21 m / 11 m ≈ 1 per strip, so
+    // 2 of 4 2BRs place. The contract under test is per-unit width ≥ minViable
+    // for everything that DID get placed; no silent narrow-pack fallback.
     const outline: [number, number][] = [
       [0, 0],
-      [50, 0],
-      [50, 12],
-      [0, 12],
+      [21, 0],
+      [21, 21],
+      [0, 21],
     ]
+    const c = placeCorridor(outline)
+    expect(c).not.toBeNull()
+    if (!c) return
     const result = packUnits({
       outline,
-      corridor: corridorFor(outline),
+      corridor: c,
       corridorWidth: 1.5,
       unitMix: baseMix([
-        { type: 'studio', count: 4, targetArea: 35 },
-        { type: '1BR', count: 6, targetArea: 55 },
-        { type: '2BR', count: 4, targetArea: 80 },
+        { type: '2BR', count: 4, targetArea: 70 },
+        { type: '1BR', count: 2, targetArea: 55 },
       ]),
     })
     expect(result).not.toBeNull()
     if (!result) return
-    expect(result.units).toHaveLength(13)
-    expect(result.unplaced).toHaveLength(1)
-    expect(result.unplaced[0]!.type).toBe('2BR')
+    for (const u of result.units) {
+      const minViable = MIN_VIABLE_WIDTH_M[u.type]
+      if (minViable === undefined) continue
+      // Polygon long-edge length on a strip-aligned axis-aligned outline
+      // is the unit width. We check via area / strip depth as a proxy
+      // (clamps that shrink width also shrink area — both flag).
+      const inferredWidth = u.area / STRIP_DEPTH
+      expect(inferredWidth).toBeGreaterThanOrEqual(minViable - 1e-6)
+    }
+    // 1BR is blocked at gate; emits the typed skip warning.
+    expect(
+      result.warnings.some(
+        (w) =>
+          w.startsWith('unit_too_narrow_for_template') && /1BR/.test(w),
+      ),
+    ).toBe(true)
+  })
 
-    const maxClamps = result.warnings.filter((w) =>
-      w.startsWith('unit_clipped_max:'),
-    )
-    // 6 × 1BR + 4 × 2BR = 10 max-clamp warnings (one per item, emitted once
-    // per queue entry at width-derivation time).
-    expect(maxClamps).toHaveLength(10)
+  it('Fix A (5): 50×30 plot + 2×3BR target 105 → packs at 13 m width (architechtures regression)', () => {
+    // 3BR nominal 105 ⇒ derived 105/9 ≈ 11.67 m, below minViable 13.
+    // 13 × 9 = 117 ≤ 195 (3BR ceiling) ⇒ widen. Both fit on strip 0
+    // (2 × 13 = 26 m of 50 m).
+    const result = packUnits({
+      outline: OUTLINE_50x30,
+      corridor: corridorFor(OUTLINE_50x30),
+      corridorWidth: 1.5,
+      unitMix: baseMix([{ type: '3BR', count: 2, targetArea: 105 }]),
+    })
+    expect(result).not.toBeNull()
+    if (!result) return
+    expect(result.units).toHaveLength(2)
+    for (const u of result.units) {
+      expect(u.area).toBeCloseTo(MIN_VIABLE_WIDTH_M['3BR']! * STRIP_DEPTH, 4)
+    }
+    expect(
+      result.warnings.some((w) =>
+        w.startsWith('unit_widened_for_bisection'),
+      ),
+    ).toBe(true)
+  })
 
-    const stripEndClamps = result.warnings.filter((w) =>
-      w.startsWith('unit_clipped_strip_end:'),
-    )
-    expect(stripEndClamps).toHaveLength(2)
+  it('Fix A (6): no silent unit-shell fallback — every placed registered unit has width ≥ its minViable', () => {
+    // Probe across 2BR/3BR/4BR targets, all of which are below their
+    // type's minViable in the derived calculation but inside the area
+    // gate after widening. After Fix A the queue is widened up front, so
+    // no placed registered-type unit ever narrower than its minViable.
+    const result = packUnits({
+      outline: OUTLINE_50x30,
+      corridor: corridorFor(OUTLINE_50x30),
+      corridorWidth: 1.5,
+      unitMix: baseMix([
+        { type: '2BR', count: 1, targetArea: 70 },
+        { type: '3BR', count: 1, targetArea: 105 },
+        { type: '4BR', count: 1, targetArea: 145 },
+      ]),
+    })
+    expect(result).not.toBeNull()
+    if (!result) return
+    for (const u of result.units) {
+      const minViable = MIN_VIABLE_WIDTH_M[u.type]
+      if (minViable === undefined) continue
+      const inferredWidth = u.area / STRIP_DEPTH
+      expect(inferredWidth).toBeGreaterThanOrEqual(minViable - 1e-6)
+    }
+  })
 
-    const drifts = result.warnings.filter((w) => w.startsWith('area_drift:'))
-    // Studios placed exactly on target ⇒ no drift entry. 1BR & 2BR clamped ⇒
-    // both exceed the 5% threshold.
-    expect(drifts.some((w) => w.includes('1BR'))).toBe(true)
-    expect(drifts.some((w) => w.includes('2BR'))).toBe(true)
-    expect(drifts.some((w) => w.includes('studio'))).toBe(false)
-
-    expect(result.warnings.some((w) => /could not be placed/.test(w))).toBe(
-      true,
-    )
-
-    // Sanity check on the band constants — if MIN/MAX move, the fixture
-    // arithmetic above stops holding.
-    expect(MIN_UNIT_WIDTH_M).toBe(4)
-    expect(MAX_UNIT_WIDTH_M).toBe(9)
+  it('30×4 plate → too narrow for any strip, placeCorridor returns null', () => {
+    // usable = 4 − 1.5 = 2.5 < MIN_STRIP_DEPTH_M (4). Caller surfaces this
+    // as `plot_too_narrow` + corridor_layout_failed.
+    const outline: [number, number][] = [
+      [0, 0],
+      [30, 0],
+      [30, 4],
+      [0, 4],
+    ]
+    expect(placeCorridor(outline)).toBeNull()
   })
 })

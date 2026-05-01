@@ -50,8 +50,12 @@ import type {
   UnitOrderingHeuristic,
 } from '../../optimizer/params'
 import type { Program } from '../../schemas'
-import type { CorridorPlan, UnitPlan } from '../types'
+import type { CorridorMode, CorridorPlan, UnitPlan } from '../types'
 import { asRectangle } from './corridor'
+import {
+  AREA_BAND_TOLERANCE_HIGH,
+  getUnitTemplate,
+} from './rooms-templates'
 
 export interface PackUnitsInput {
   outline: Polygon2D
@@ -93,23 +97,79 @@ export interface PackUnitsResult {
   warnings: string[]
 }
 
-/** Two strips per floor: +perpendicular (left) and −perpendicular (right). */
-const STRIP_COUNT = 2
+/**
+ * Strips per floor by corridor mode:
+ *   - `'double-loaded'`: 2 strips flanking a centred corridor.
+ *   - `'single-loaded'`: 1 strip on the +perpendicular side (corridor
+ *     hugs the −perpendicular outline edge).
+ */
+const STRIP_SIGNS_BY_MODE: Record<CorridorMode, Array<1 | -1>> = {
+  'double-loaded': [1, -1],
+  'single-loaded': [1],
+}
 
 /**
  * Habitability band for unit width along the long axis.
  *
- * Floor of 4 m (not 3 m) is set by the 1BR/2BR/3BR template's strip-1
- * 0.6/0.4 hallway/bathroom split: a 3 m unit gives a 1.2 m bathroom
- * across-extent, which fails `minRoomDimensionM = 1.5` in `bisectUnit`
- * and silently falls back to unit-shell. With 4 m, the bathroom is
- * 0.4 × 4 = 1.6 m, comfortably above the floor. Studio's strip-1 is
- * full-width and unaffected at either floor; the templates trade tight
- * bathrooms for deterministic subdivision below 4 m. See PROGRESS.md
- * Phase 3-7 Task 8 for the diagnosis trail.
+ * Floor of 4 m is the ABSOLUTE floor — applied to types not registered
+ * in `MIN_VIABLE_WIDTH_M` (Studios + any unknown caller-defined type).
+ * For typed units (1BR/2BR/3BR/4BR), the per-type `MIN_VIABLE_WIDTH_M`
+ * floor is ALWAYS used instead and is strictly higher: it's the
+ * smallest width at which the type's template can subdivide into rooms
+ * without violating `minRoomDimensionM` (1.5 m). The packer uses this
+ * to widen too-narrow units (`unit_widened_for_bisection`) or refuse
+ * to place them (`unit_too_narrow_for_template`) instead of silently
+ * letting them fall back to unit-shell downstream.
+ *
+ * Ceiling of 18 m is a sanity cap. A 18 m × 9 m strip is 162 m² —
+ * top of the 4BR area band. Anything wider is out of scope for
+ * residential mid-rise. Raised from 9 m in Phase 3-7 close-out (Fix A)
+ * because 2BR target 125 m² at strip depth 9 derives 13.89 m wide;
+ * the old 9 m clamp turned every 2BR into a 9 × 9 square that the
+ * template couldn't bisect.
  */
 export const MIN_UNIT_WIDTH_M = 4
-export const MAX_UNIT_WIDTH_M = 9
+export const MAX_UNIT_WIDTH_M = 18
+
+/**
+ * Per-type minimum width (m) below which the type's template is known
+ * to fail `bisectUnit`'s `minRoomDimensionM` floor at the fixed
+ * `TARGET_STRIP_DEPTH_M = 9` strip depth.
+ *
+ * These are STATIC. Drift between templates and these constants is
+ * caught by a regression test in `rooms-templates.test.ts` that calls
+ * `computeMinViableWidth(template, TARGET_STRIP_DEPTH_M)` and asserts
+ * `MIN_VIABLE_WIDTH_M[type] >= computed`. If a template's fractions
+ * change so that this invariant breaks, the test fails pointing at the
+ * mismatched constant — much safer than silently re-deriving at
+ * runtime (a tiny rounding difference would let unbisectable units
+ * sneak through).
+ *
+ * Studio is registered at the absolute floor (4 m). Studios are
+ * intentionally exempt from "must be bisectable": the Studio template
+ * has a 0.15 root fraction that needs `0.15 × stripDepth = 1.35 m <
+ * 1.5 m`, so it can NEVER bisect at our 9 m strip depth and always
+ * falls back to unit-shell. The packer sees `MIN_VIABLE_WIDTH_M =
+ * MIN_UNIT_WIDTH_M` for Studio and treats it as the legacy "just place
+ * something" path; downstream, the unit-shell fallback covers it.
+ */
+export const MIN_VIABLE_WIDTH_M: Record<string, number> = {
+  Studio: 4,
+  '1BR': 13,
+  '2BR': 11,
+  '3BR': 13,
+  '4BR': 13,
+}
+
+/**
+ * Look up the per-type minimum-viable width. Returns `MIN_UNIT_WIDTH_M`
+ * for unregistered types so a caller-defined `'penthouse'` (or any
+ * future type without a template) still gets the legacy floor instead
+ * of a thrown error.
+ */
+function minViableWidthFor(type: string): number {
+  return MIN_VIABLE_WIDTH_M[type] ?? MIN_UNIT_WIDTH_M
+}
 
 /** Drift threshold for the per-type `area_drift` summary warning. */
 const AREA_DRIFT_THRESHOLD = 0.05
@@ -125,14 +185,19 @@ export function packUnits(input: PackUnitsInput): PackUnitsResult | null {
   const rect = asRectangle(outline)
   if (!rect) return null
 
-  // Derive run length + strip depth + basis. When the corridor was placed
-  // along the short axis, the packer's "long axis" is actually the
-  // rectangle's short axis — using the corridor's centerline as the
-  // canonical source means this stage stops re-deriving the wrong axis.
+  // Derive run length + strip depth + basis + mode from the corridor plan.
+  // The corridor object is the canonical source: it knows whether the
+  // floor was laid out double- or single-loaded (Phase 3-7 close-out
+  // refactor), so the packer doesn't re-decide that here.
+  //
   // Fall back to the long-axis derivation when the corridor doesn't
-  // carry runLength (older fixtures, direct unit tests of packUnits).
+  // carry runLength/stripDepth (older fixtures, direct unit tests of
+  // packUnits that pass a hand-built CorridorPlan). The fallback assumes
+  // double-loaded with the legacy formula — preserved only for those
+  // tests; production code always goes through `placeCorridor`.
   let runLength: number
   let stripDepth: number
+  let mode: CorridorMode
   let ux: number
   let uy: number
   let cx: number
@@ -144,6 +209,7 @@ export function packUnits(input: PackUnitsInput): PackUnitsResult | null {
   ) {
     runLength = corridor.runLength
     stripDepth = corridor.stripDepth
+    mode = corridor.mode ?? 'double-loaded'
     const [a, b] = corridor.centerline
     const dx = b[0] - a[0]
     const dy = b[1] - a[1]
@@ -156,6 +222,7 @@ export function packUnits(input: PackUnitsInput): PackUnitsResult | null {
   } else {
     runLength = rect.longLen
     stripDepth = (rect.shortLen - corridorWidth) / 2
+    mode = corridor.mode ?? 'double-loaded'
     ux = rect.longDir[0]
     uy = rect.longDir[1]
     cx = rect.center[0]
@@ -171,6 +238,8 @@ export function packUnits(input: PackUnitsInput): PackUnitsResult | null {
   const vy = ux
   const halfL = runLength / 2
   const corridorHalf = corridorWidth / 2
+  const stripSigns = STRIP_SIGNS_BY_MODE[mode]
+  const STRIP_COUNT = stripSigns.length
 
   // Expand unitMix into a flat queue of placement attempts. Width is the
   // pre-clamped target value — placement may further narrow it via strip-end
@@ -179,21 +248,48 @@ export function packUnits(input: PackUnitsInput): PackUnitsResult | null {
     type: string
     targetArea: number
     width: number
+    minViable: number
     derivedWidth: number
-    minClamped: boolean
+    widened: boolean
     maxClamped: boolean
   }
   const queue: QueueItem[] = []
   const warnings: string[] = []
+  // Phase 3-7 Fix A: a type is "feasible" at this strip depth if the
+  // minimum-viable rectangle (minViable × stripDepth) fits inside the
+  // template's effective area band. If not — e.g. 1BR minViable 13 m ×
+  // 9 m = 117 m², 1BR template upper gate 1.5 × 70 = 105 — widening
+  // would just push the unit over the bisection gate and trigger a
+  // different silent fallback. Better to refuse placement up front
+  // with a panel-ready warning that names the constraint.
+  const blockedTypes = new Set<string>()
   for (const entry of unitMix) {
     if (entry.count <= 0) continue
+    const minViable = minViableWidthFor(entry.type)
+    const template = getUnitTemplate(entry.type)
+    if (template) {
+      const minViableArea = minViable * depth
+      const upperGateArea =
+        template.areaRangeM2.max * AREA_BAND_TOLERANCE_HIGH
+      if (minViableArea > upperGateArea + 1e-6) {
+        // Widening this type to its minViable width would overshoot
+        // the template's area-band gate. Skip every unit of this type
+        // on this floor and emit one summary warning; we don't repeat
+        // it per unplaced entry.
+        blockedTypes.add(entry.type)
+        warnings.push(
+          `unit_too_narrow_for_template: cannot place ${entry.type} (target ${entry.targetArea.toFixed(0)} m²): needs ≥${minViable}m width to subdivide into rooms but that yields ${minViableArea.toFixed(0)} m² — over the ${entry.type} template ceiling of ${upperGateArea.toFixed(0)} m². Suggestions: reduce ${entry.type} count, increase footprint depth (currently ${depth.toFixed(1)} m strip), or substitute a larger unit type.`,
+        )
+        continue
+      }
+    }
     const derivedWidth = entry.targetArea / depth
     let width = derivedWidth
-    let minClamped = false
+    let widened = false
     let maxClamped = false
-    if (derivedWidth < MIN_UNIT_WIDTH_M) {
-      width = MIN_UNIT_WIDTH_M
-      minClamped = true
+    if (derivedWidth < minViable) {
+      width = minViable
+      widened = true
     } else if (derivedWidth > MAX_UNIT_WIDTH_M) {
       width = MAX_UNIT_WIDTH_M
       maxClamped = true
@@ -203,19 +299,30 @@ export function packUnits(input: PackUnitsInput): PackUnitsResult | null {
         type: entry.type,
         targetArea: entry.targetArea,
         width,
+        minViable,
         derivedWidth,
-        minClamped,
+        widened,
         maxClamped,
       })
-      if (minClamped) {
+      if (widened) {
         warnings.push(
-          `unit_clipped_min: ${entry.type} target width ${derivedWidth.toFixed(2)}m → ${MIN_UNIT_WIDTH_M}m`,
+          `unit_widened_for_bisection: ${entry.type} target width ${derivedWidth.toFixed(2)}m → ${minViable}m (template needs ≥${minViable}m at strip depth ${depth.toFixed(1)}m to subdivide into rooms)`,
         )
       } else if (maxClamped) {
         warnings.push(
           `unit_clipped_max: ${entry.type} target width ${derivedWidth.toFixed(2)}m → ${MAX_UNIT_WIDTH_M}m`,
         )
       }
+    }
+  }
+  // Surface blocked-type counts so the panel can show "0 of N placed".
+  for (const t of blockedTypes) {
+    const requested =
+      unitMix.find((e) => e.type === t && e.count > 0)?.count ?? 0
+    if (requested > 0) {
+      warnings.push(
+        `${requested} unit(s) of type ${t} could not be placed — see unit_too_narrow_for_template above.`,
+      )
     }
   }
 
@@ -229,10 +336,6 @@ export function packUnits(input: PackUnitsInput): PackUnitsResult | null {
   } else if (unitOrdering === 'smallest-first') {
     queue.sort((a, b) => a.targetArea - b.targetArea)
   }
-
-  // Each strip has a sign for its perpendicular direction. +1 puts the strip
-  // on the +v side (inner edge at +corridorHalf, outer edge at +shortLen/2).
-  const stripSigns: Array<1 | -1> = [1, -1]
 
   const units: UnitPlan[] = []
   const unplaced: PackUnitsResult['unplaced'] = []
@@ -301,17 +404,30 @@ export function packUnits(input: PackUnitsInput): PackUnitsResult | null {
       let placedWidth: number
       if (item.width <= remaining + 1e-9) {
         placedWidth = item.width
-      } else if (remaining >= MIN_UNIT_WIDTH_M) {
+      } else if (remaining >= item.minViable) {
+        // Strip-end clamp respects the per-type minViable floor: a 2BR
+        // can be clipped down to its 11 m minViable but not below
+        // (11×9 = 99 m² is still inside the 2BR area band; an 8 m clip
+        // would be 72 m² in a square-ish shape that the 2BR template
+        // can't bisect).
         placedWidth = remaining
         warnings.push(
           `unit_clipped_strip_end: ${item.type} clipped to remaining ${remaining.toFixed(2)}m at strip end`,
         )
       } else {
-        // Strip too short — try the next strip without clipping below MIN.
+        // Strip too short — try the next strip without clipping below
+        // the type's minViable. If neither strip has room, the unit
+        // is recorded as unplaced.
         continue
       }
 
       const sign = stripSigns[idx]!
+      // Outer edge of the strip in corridor-local p-coords. With fixed
+      // strip depth this is `corridorHalf + stripDepth`, NOT `shortLen/2`
+      // — on plates wider than `2 × TARGET_STRIP_DEPTH_M + corridorWidth`
+      // there's an unused buffer between the strip's outer edge and the
+      // building outline. Documented trade-off, see PROGRESS.md.
+      const outerHalf = corridorHalf + stripDepth
       const unit = makeUnit(
         item.type,
         item.targetArea,
@@ -319,7 +435,7 @@ export function packUnits(input: PackUnitsInput): PackUnitsResult | null {
         cursor + placedWidth,
         sign,
         corridorHalf,
-        rect.shortLen / 2,
+        outerHalf,
         { ux, uy, vx, vy, cx, cy },
         stripUnitIndices[idx]!.length === 0,
       )
