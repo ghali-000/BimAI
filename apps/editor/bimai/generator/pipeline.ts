@@ -32,6 +32,7 @@ import { placeCorridor } from './stages/corridor'
 import { chooseFootprint, footprintParamsFrom } from './stages/footprint'
 import { planFloors } from './stages/floors'
 import { attachRoomsToUnits } from './stages/rooms'
+import { planRoof } from './stages/roof'
 import { computeStairReservation, placeStairCores } from './stages/stairs'
 import { RESIDENTIAL_STAIR } from './stages/stairs-templates'
 import { packUnits } from './stages/units'
@@ -245,10 +246,10 @@ export function buildPlan(
 
   // Phase 3-8 stairs/roof: place the stair core(s) using the canonical
   // first-floor corridor (geometry is identical per floor in 3-8). The
-  // roof is always present — `flat-with-parapet` is the default
-  // residential mid-rise typology, and `slabPolygon` matches the
-  // top-floor slab outline byte-for-byte. Top-of-building elevation =
-  // floorCount × floorHeight.
+  // roof typology is locked by GATE 2 (`flat-with-parapet` — see
+  // `stages/roof.ts`). `planRoof` derives parapet polygon + per-edge
+  // canonical wall ids; the emitter (Task 7) reads them straight off
+  // the plan.
   const stairs = placeStairCores(
     {
       footprint: footprint.polygon,
@@ -272,11 +273,11 @@ export function buildPlan(
     floorHeight: floorsResult.floorHeight,
     floors,
     stairs,
-    roof: {
-      typology: 'flat-with-parapet',
-      slabPolygon: footprint.polygon,
-      elevation: floorsResult.floorCount * floorsResult.floorHeight,
-    },
+    roof: planRoof({
+      footprint: footprint.polygon,
+      floorCount: floorsResult.floorCount,
+      floorHeight: floorsResult.floorHeight,
+    }),
     warnings,
     params,
   }
