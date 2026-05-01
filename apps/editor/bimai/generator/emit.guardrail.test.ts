@@ -16,6 +16,8 @@ import {
   DoorNode,
   LevelNode,
   SlabNode,
+  StairNode,
+  StairSegmentNode,
   WallNode,
   WindowNode,
   ZoneNode,
@@ -40,6 +42,8 @@ const SCHEMAS: Record<
   slab: SlabNode,
   zone: ZoneNode,
   level: LevelNode,
+  stair: StairNode,
+  'stair-segment': StairSegmentNode,
 }
 
 // Same shape the running app uses (4 Studio + 6 1BR + 4 2BR on 50×30,
@@ -106,7 +110,19 @@ describe('emit drift guardrail', () => {
     for (const n of Object.values(writer.getSnapshot().nodes)) {
       if (n.id !== BUILDING_ID) types.add(n.type)
     }
-    expect(types).toEqual(new Set(['level', 'slab', 'wall', 'zone', 'door', 'window']))
+    expect(types).toEqual(
+      new Set([
+        'level',
+        'slab',
+        'wall',
+        'zone',
+        'door',
+        'window',
+        // Phase 3-8: realistic input is multi-floor → stair core + segments.
+        'stair',
+        'stair-segment',
+      ]),
+    )
 
     const failures: string[] = []
     for (const n of Object.values(writer.getSnapshot().nodes)) {

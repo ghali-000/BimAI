@@ -22,6 +22,8 @@ import type {
   DoorNode,
   LevelNode,
   SlabNode,
+  StairNode,
+  StairSegmentNode,
   WallNode,
   WindowNode,
   ZoneNode,
@@ -37,6 +39,7 @@ import type {
   CorridorPlan,
   FloorPlan,
   NodeOp,
+  StairCorePlan,
   UnitPlan,
 } from './types'
 
@@ -54,6 +57,8 @@ export const DEFAULT_WINDOW_SILL_M = 0.9
 export const DEFAULT_SLAB_ELEVATION_M = 0.05
 /** Minimum free wall length around an opening. Keeps openings off corners. */
 export const OPENING_CLEAR_MARGIN_M = 0.2
+/** Phase 3-8: stair tread/landing slab thickness, metres. Pascal default. */
+export const DEFAULT_STAIR_THICKNESS_M = 0.25
 
 // ── Public API ───────────────────────────────────────────────────────────────
 
@@ -67,14 +72,31 @@ export interface EmitContext {
 /**
  * Top-level entry point. Returns a flat list of NodeOps in dependency order
  * (level → slab/walls/zones → door/window children of walls).
+ *
+ * Phase 3-8: stair cores are emitted *after* every floor so the StairNode
+ * can reference the floor levels' Pascal ids in its `fromLevelId` /
+ * `toLevelId` fields without a forward declaration. Slab penetrations
+ * are written into the per-floor slab op (level >= 1 only — the ground
+ * slab stays solid and the roof is untouched).
  */
 export function emitBuildingPlan(
   plan: BuildingPlan,
   ctx: EmitContext,
 ): NodeOp[] {
   const ops: NodeOp[] = []
-  for (const floor of plan.floors) {
-    ops.push(...emitFloor(floor, plan, ctx))
+  // First pass: assign level ids per floor so stair cores can reference
+  // them. Done here (not inside emitFloor) so the stair-emission step can
+  // resolve fromLevelId/toLevelId without re-walking the ops list.
+  const levelIdByFloor = plan.floors.map(() => generateId('level'))
+  for (let i = 0; i < plan.floors.length; i++) {
+    const floor = plan.floors[i]!
+    const levelId = levelIdByFloor[i]!
+    ops.push(...emitFloor(floor, plan, ctx, levelId))
+  }
+  // Stair cores parented to the building (one StairNode per core, with
+  // StairSegmentNode children, one per inter-floor flight).
+  for (const stair of plan.stairs) {
+    ops.push(...emitStairCore(stair, plan, levelIdByFloor, ctx))
   }
   return ops
 }
@@ -85,13 +107,31 @@ function emitFloor(
   floor: FloorPlan,
   plan: BuildingPlan,
   ctx: EmitContext,
+  levelId: ReturnType<typeof generateId<'level'>>,
 ): NodeOp[] {
   const ops: NodeOp[] = []
 
-  const levelId = generateId('level')
   ops.push(emitLevel(levelId, floor, ctx))
 
-  ops.push(emitSlab(levelId, floor, ctx))
+  // Phase 3-8: slab penetrations for stair shafts. The ground floor's
+  // slab stays solid (no hole); levels >= 1 get a hole per stair core
+  // so the flight below can break through. The roof slab is emitted by
+  // a separate stage (Task 7) and is intentionally left unpenetrated —
+  // residential mid-rise stairs terminate at the topmost storey.
+  const shaftHoles =
+    floor.level >= 1
+      ? plan.stairs.map((s) => ({ polygon: s.shaftPolygon, stairId: s.id }))
+      : []
+  ops.push(emitSlab(levelId, floor, ctx, shaftHoles))
+
+  // Phase 3-8: stair shaft walls (4 per core, per floor) — fire-rated
+  // partition between the corridor / units and the stair shaft. The
+  // wall ids come from the canonical-edge hash baked into the
+  // StairCorePlan so regen is deterministic and the IFC writer can
+  // resolve which wall belongs to which shaft edge.
+  for (const stair of plan.stairs) {
+    ops.push(...emitStairShaftWalls(levelId, floor.level, stair, plan, ctx))
+  }
 
   // Walls. We pre-allocate IDs so doors/windows can reference them.
   const wallSet = buildWallSet(floor, plan, ctx)
@@ -185,6 +225,15 @@ function emitSlab(
   levelId: AnyNodeId,
   floor: FloorPlan,
   ctx: EmitContext,
+  /**
+   * Phase 3-8: stair-shaft cutouts to punch through this slab. Empty for
+   * the ground floor (level 0) and the roof; populated for levels >= 1
+   * with one entry per stair core. Each entry's `polygon` is the shaft's
+   * outer rectangle in world coords; `stairId` is recorded on
+   * `holeMetadata[i]` so a downstream "delete this stair" action can
+   * find the matching hole without re-running the geometry.
+   */
+  shaftHoles: Array<{ polygon: [number, number][]; stairId: string }> = [],
 ): NodeOp {
   const id = generateId('slab')
   const node: SlabNode = {
@@ -194,8 +243,13 @@ function emitSlab(
     parentId: levelId,
     visible: true,
     polygon: floor.outline.map((p) => [p[0], p[1]] as [number, number]),
-    holes: [],
-    holeMetadata: [],
+    holes: shaftHoles.map((h) =>
+      h.polygon.map((p) => [p[0], p[1]] as [number, number]),
+    ),
+    holeMetadata: shaftHoles.map((h) => ({
+      source: 'stair' as const,
+      stairId: h.stairId,
+    })),
     elevation: DEFAULT_SLAB_ELEVATION_M,
     autoFromWalls: false,
     metadata: {},
@@ -738,6 +792,206 @@ function emitWindowOnWall(
     node: tagAsGenerated(node, ctx.generationId),
     parentId: wall.id as AnyNodeId,
   }
+}
+
+// ── Stair core emission (Phase 3-8) ──────────────────────────────────────────
+
+/**
+ * Emit the four shaft walls bounding a stair core on a single level. The
+ * wall ids come from `stair.enclosingWallIds[i]` so the canonical-edge
+ * hash assigned by the planning stage survives all the way through to
+ * the WallNode id — regen with the same plan ⇒ same wall ids, and the
+ * IFC writer can resolve "which wall belongs to which shaft edge"
+ * without coordinate matching.
+ *
+ * Each shaft wall runs the full floor-to-floor height. We map polygon
+ * edge i = `shaftPolygon[i] → shaftPolygon[(i+1) % 4]` to a WallNode
+ * with id = `enclosingWallIds[i]`. The role tag `'stair-shaft'` is
+ * recognised by `bim-defaults.ts` (interior, non-load-bearing) so the
+ * cost / IFC layers route the wall to the correct material bucket.
+ */
+function emitStairShaftWalls(
+  levelId: AnyNodeId,
+  levelIndex: number,
+  stair: StairCorePlan,
+  plan: BuildingPlan,
+  ctx: EmitContext,
+): NodeOp[] {
+  const ops: NodeOp[] = []
+  const wallHeight = plan.floorHeight
+  for (let i = 0; i < stair.shaftPolygon.length; i++) {
+    const a = stair.shaftPolygon[i]!
+    const b = stair.shaftPolygon[(i + 1) % stair.shaftPolygon.length]!
+    // Pascal's WallNode id must match `^wall_…`. The canonical edge id
+    // (`stair-shaft_<12hex>`) lives on `metadata.bimai.canonicalEdgeId`
+    // instead so the IFC writer (Task 9) and any future "find this
+    // shaft wall across regen" workflow can resolve it without parsing
+    // the Pascal id. Per-level uniqueness is provided by `generateId`.
+    const id = generateId('wall')
+    const node: WallNode = {
+      object: 'node',
+      id,
+      type: 'wall',
+      parentId: levelId,
+      visible: true,
+      start: [a[0], a[1]],
+      end: [b[0], b[1]],
+      thickness: DEFAULT_WALL_THICKNESS_M,
+      height: wallHeight,
+      children: [],
+      frontSide: 'interior',
+      backSide: 'interior',
+      metadata: {
+        bimai: {
+          wallRole: 'stair-shaft',
+          stairId: stair.id,
+          shaftEdgeIndex: i,
+          canonicalEdgeId: stair.enclosingWallIds[i],
+          levelIndex,
+        },
+      },
+    } as unknown as WallNode
+    ops.push({ node: tagAsGenerated(node, ctx.generationId), parentId: levelId })
+  }
+  return ops
+}
+
+/**
+ * Emit a single stair core: one StairNode (parented to the building)
+ * containing N-1 StairSegmentNode children (one per inter-floor flight).
+ *
+ * Geometry mapping. Pascal's StairNode is a container with a single
+ * `position` + `rotation` (radians, around Y) and an array of segments
+ * that stack along the local +Z axis. We:
+ *   - position the StairNode at the shaft's south-west world corner
+ *     (the `position` field on `StairCorePlan`),
+ *   - rotate it so segment +Z runs along the corridor's u-axis (atan2
+ *     of the corridor direction),
+ *   - emit one StairSegmentNode per flight, each at local Y =
+ *     `flight.startElevation` so it lands at the correct floor height.
+ *
+ * `slabOpeningMode: 'none'` because we patch the slab holes manually
+ * via `SlabNode.holes` + `holeMetadata` (Task 4 → Task 5 brief). Letting
+ * Pascal's auto-cutout run alongside our manual holes would double up.
+ *
+ * `fromLevelId` / `toLevelId` are populated for IFC export (the writer
+ * uses them to wire `IfcRelConnectsStructuralElement`); they don't drive
+ * geometry here.
+ */
+function emitStairCore(
+  stair: StairCorePlan,
+  plan: BuildingPlan,
+  levelIdByFloor: Array<ReturnType<typeof generateId<'level'>>>,
+  ctx: EmitContext,
+): NodeOp[] {
+  const ops: NodeOp[] = []
+  if (stair.flights.length === 0) return ops
+
+  // Compute the StairNode's world rotation from the shaft polygon's
+  // 0→1 edge (which runs along the corridor u-axis by construction in
+  // stairs.ts). atan2(dz, dx) gives the rotation around Y so the
+  // StairNode's local +X aligns with the corridor's +u direction.
+  const p0 = stair.shaftPolygon[0]!
+  const p1 = stair.shaftPolygon[1]!
+  const ux = p1[0] - p0[0]
+  const uz = p1[1] - p0[1]
+  const rotationY = Math.atan2(uz, ux)
+
+  // Stair container position: south-west corner of the shaft polygon.
+  // Pascal's stair renderer extrudes from this point along the local
+  // axes so the result fills the shaft footprint.
+  const stairId = stair.id as StairNode['id']
+  const segmentIds: StairSegmentNode['id'][] = []
+  const totalRise = stair.flights.reduce(
+    (s, f) => s + (f.endElevation - f.startElevation),
+    0,
+  )
+  const totalSteps = stair.flights.reduce((s, f) => s + f.stepCount, 0)
+
+  // Children first so the StairNode's `children` array can reference them.
+  for (let i = 0; i < stair.flights.length; i++) {
+    const f = stair.flights[i]!
+    const segId = generateId('sseg')
+    segmentIds.push(segId)
+    const seg: StairSegmentNode = {
+      object: 'node',
+      id: segId,
+      type: 'stair-segment',
+      parentId: stairId as unknown as AnyNodeId,
+      visible: true,
+      // Local frame: stair container is at the SW corner; segments
+      // stack along +X (corridor u-axis) at increasing Y. In 3-8 we
+      // ship only one flight per inter-floor span, so each segment's
+      // local position is purely a Y offset from the StairNode.
+      position: [0, f.startElevation, 0],
+      rotation: 0,
+      segmentType: 'stair',
+      width: stair.width,
+      length: stair.depth,
+      height: f.endElevation - f.startElevation,
+      stepCount: f.stepCount,
+      attachmentSide: 'front',
+      fillToFloor: i === 0, // ground flight closes off; upper flights free-span
+      thickness: DEFAULT_STAIR_THICKNESS_M,
+      metadata: {
+        bimai: {
+          stairRole: 'stair-flight',
+          stairId: stair.id,
+          fromLevel: f.fromLevel,
+          toLevel: f.toLevel,
+        },
+      },
+    } as unknown as StairSegmentNode
+    ops.push({
+      node: tagAsGenerated(seg, ctx.generationId),
+      parentId: stairId as unknown as AnyNodeId,
+    })
+  }
+
+  const fromLevelId = levelIdByFloor[stair.flights[0]!.fromLevel] ?? null
+  const toLevelId =
+    levelIdByFloor[stair.flights.at(-1)!.toLevel] ?? null
+  const stairNode: StairNode = {
+    object: 'node',
+    id: stairId,
+    type: 'stair',
+    parentId: ctx.buildingId,
+    visible: true,
+    position: [stair.position[0], 0, stair.position[1]],
+    rotation: rotationY,
+    stairType: 'straight',
+    fromLevelId,
+    toLevelId,
+    // Holes are written manually onto each SlabNode (see emitSlab) so
+    // Pascal's destination-slab auto-cutout would double up here.
+    slabOpeningMode: 'none',
+    openingOffset: 0,
+    width: stair.width,
+    totalRise,
+    stepCount: totalSteps,
+    thickness: DEFAULT_STAIR_THICKNESS_M,
+    fillToFloor: true,
+    innerRadius: 0.9,
+    sweepAngle: Math.PI / 2,
+    topLandingMode: 'none',
+    topLandingDepth: 0.9,
+    showCenterColumn: true,
+    showStepSupports: true,
+    railingMode: 'both',
+    railingHeight: 0.92,
+    children: segmentIds,
+    metadata: {
+      bimai: {
+        stairRole: 'stair-core',
+        flightCount: stair.flights.length,
+      },
+    },
+  } as unknown as StairNode
+  ops.push({
+    node: tagAsGenerated(stairNode, ctx.generationId),
+    parentId: ctx.buildingId,
+  })
+  return ops
 }
 
 // ── Type-narrowing re-export so callers don't need @pascal-app/core types ────

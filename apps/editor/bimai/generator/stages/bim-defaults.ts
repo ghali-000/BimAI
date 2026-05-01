@@ -53,7 +53,12 @@ interface WallContext {
   isLoadBearing: boolean
 }
 
-type WallRole = 'perimeter' | 'corridor' | 'party' | 'room-partition'
+type WallRole =
+  | 'perimeter'
+  | 'corridor'
+  | 'party'
+  | 'room-partition'
+  | 'stair-shaft'
 
 function readWallRole(node: AnyNode): WallRole | undefined {
   const meta = (node.metadata ?? {}) as Record<string, unknown>
@@ -64,7 +69,8 @@ function readWallRole(node: AnyNode): WallRole | undefined {
     role === 'perimeter' ||
     role === 'corridor' ||
     role === 'party' ||
-    role === 'room-partition'
+    role === 'room-partition' ||
+    role === 'stair-shaft'
   ) {
     return role
   }
@@ -73,9 +79,14 @@ function readWallRole(node: AnyNode): WallRole | undefined {
 
 function wallContextFromRole(role: WallRole | undefined): WallContext {
   if (role === 'perimeter') return { isExterior: true, isLoadBearing: true }
-  // corridor, party, room-partition, or unknown all default to interior
-  // non-load-bearing. Listed explicitly so adding a future load-bearing role
-  // is a one-line change here rather than a silent fall-through.
+  // corridor, party, room-partition, stair-shaft, or unknown all default
+  // to interior non-load-bearing. Stair-shaft walls would ideally bump the
+  // fire rating to A2 (fire-rated egress core), but the materials catalog
+  // doesn't carry a separate "interior fire-rated drywall" SKU yet, so we
+  // route them through the same interior bucket; bim/materials.ts is the
+  // place to add a fire-rated variant when we want this to land in the
+  // schedule. Listed explicitly so adding a future load-bearing role is a
+  // one-line change here rather than a silent fall-through.
   return { isExterior: false, isLoadBearing: false }
 }
 

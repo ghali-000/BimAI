@@ -4,6 +4,8 @@ import { calculatePolygonArea } from '../lib/geometry'
 import { roomColor } from '../lib/unit-colors'
 import { placeCorridor } from './stages/corridor'
 import { attachRoomsToUnits } from './stages/rooms'
+import { placeStairCores } from './stages/stairs'
+import { RESIDENTIAL_STAIR } from './stages/stairs-templates'
 import { packUnits } from './stages/units'
 import {
   DEFAULT_DOOR_HEIGHT_M,
@@ -881,5 +883,307 @@ describe('emitBuildingPlan — room doors (Phase 3-7 Task 8)', () => {
     expect(internal.length).toBeGreaterThanOrEqual(1)
     // All door widths use the default; emitter never resizes for doors.
     for (const d of doors) expect(d.width).toBeCloseTo(DEFAULT_DOOR_WIDTH_M, 9)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────
+// Phase 3-8 Task 5 — stair emission (StairNode + StairSegmentNodes +
+// per-floor shaft walls + slab-hole patches)
+// ─────────────────────────────────────────────────────────────────────
+
+interface StairNodeShape {
+  type: 'stair'
+  id: string
+  parentId: string | null
+  position: [number, number, number]
+  rotation: number
+  fromLevelId: string | null
+  toLevelId: string | null
+  slabOpeningMode: 'none' | 'destination'
+  totalRise: number
+  stepCount: number
+  width: number
+  children: string[]
+  metadata?: { bimai?: Record<string, unknown> }
+}
+
+interface StairSegmentShape {
+  type: 'stair-segment'
+  id: string
+  parentId: string | null
+  position: [number, number, number]
+  segmentType: 'stair' | 'landing'
+  width: number
+  length: number
+  height: number
+  stepCount: number
+  metadata?: { bimai?: Record<string, unknown> }
+}
+
+interface SlabShape {
+  type: 'slab'
+  id: string
+  parentId: string | null
+  polygon: [number, number][]
+  holes: [number, number][][]
+  holeMetadata: Array<{ source: string; stairId?: string }>
+}
+
+const STAIR_OUTLINE_30x18: [number, number][] = [
+  [0, 0],
+  [30, 0],
+  [30, 18],
+  [0, 18],
+]
+
+/** Build a multi-floor plan that actually carries stair cores. */
+function buildStairPlan(floorCount: number): BuildingPlan {
+  const corridor = placeCorridor(STAIR_OUTLINE_30x18)
+  if (!corridor) throw new Error('test setup: corridor placement failed')
+  const packed = packUnits({
+    outline: STAIR_OUTLINE_30x18,
+    corridor,
+    corridorWidth: 1.5,
+    unitMix: [{ type: '2BR', count: 4, targetArea: 60 }],
+  })
+  if (!packed) throw new Error('test setup: pack failed')
+  const stairs = placeStairCores(
+    {
+      footprint: STAIR_OUTLINE_30x18,
+      floorCount,
+      floorHeight: 3,
+      corridor,
+    },
+    RESIDENTIAL_STAIR,
+  )
+  const floors: FloorPlan[] = []
+  for (let i = 0; i < floorCount; i++) {
+    floors.push({
+      level: i,
+      outline: STAIR_OUTLINE_30x18,
+      corridor,
+      units: packed.units,
+    })
+  }
+  return {
+    generationId: GEN_ID,
+    footprint: STAIR_OUTLINE_30x18,
+    floorCount,
+    floorHeight: 3,
+    floors,
+    stairs,
+    roof: {
+      typology: 'flat-with-parapet',
+      slabPolygon: STAIR_OUTLINE_30x18,
+      elevation: floorCount * 3,
+    },
+    warnings: [],
+    params: DEFAULT_PARAMS,
+  }
+}
+
+describe('emitBuildingPlan — stair core (Phase 3-8 Task 5)', () => {
+  it('emits zero stair / stair-segment ops for a single-floor plan', () => {
+    const ops = emitBuildingPlan(buildSingleFloorPlan(), {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    expect(ops.filter((o) => o.node.type === 'stair')).toHaveLength(0)
+    expect(ops.filter((o) => o.node.type === 'stair-segment')).toHaveLength(0)
+  })
+
+  it('emits exactly one StairNode parented to the building, with N-1 segment children', () => {
+    const plan = buildStairPlan(4)
+    expect(plan.stairs.length).toBe(1)
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const stairs = ops.filter((o) => o.node.type === 'stair')
+    expect(stairs).toHaveLength(1)
+    const stair = stairs[0]!.node as unknown as StairNodeShape
+    expect(stairs[0]!.parentId).toBe(BUILDING_ID)
+    expect(stair.parentId).toBe(BUILDING_ID)
+
+    const segments = ops.filter((o) => o.node.type === 'stair-segment')
+    expect(segments).toHaveLength(3) // floorCount-1
+    for (const s of segments) {
+      expect(s.parentId).toBe(stair.id)
+      expect((s.node as unknown as StairSegmentShape).parentId).toBe(stair.id)
+    }
+    // StairNode.children references every segment id, in order.
+    expect(stair.children).toEqual(
+      segments.map((s) => s.node.id),
+    )
+  })
+
+  it('segments stack along Y, one per inter-floor span (no drift)', () => {
+    const plan = buildStairPlan(4)
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const segs = ops
+      .filter((o) => o.node.type === 'stair-segment')
+      .map((o) => o.node as unknown as StairSegmentShape)
+    expect(segs).toHaveLength(3)
+    for (let i = 0; i < segs.length; i++) {
+      expect(segs[i]!.position[1]).toBeCloseTo(i * 3, 9)
+      expect(segs[i]!.height).toBeCloseTo(3, 9)
+      expect(segs[i]!.segmentType).toBe('stair')
+      expect(segs[i]!.width).toBe(2.5) // RESIDENTIAL_STAIR.width
+      expect(segs[i]!.length).toBe(4.0) // RESIDENTIAL_STAIR.depth
+    }
+  })
+
+  it('StairNode.totalRise / stepCount sum the flight contributions', () => {
+    const plan = buildStairPlan(5)
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const stair = ops.find((o) => o.node.type === 'stair')!
+      .node as unknown as StairNodeShape
+    const flightRiseSum = plan.stairs[0]!.flights.reduce(
+      (s, f) => s + (f.endElevation - f.startElevation),
+      0,
+    )
+    const flightStepSum = plan.stairs[0]!.flights.reduce(
+      (s, f) => s + f.stepCount,
+      0,
+    )
+    expect(stair.totalRise).toBeCloseTo(flightRiseSum, 9)
+    expect(stair.stepCount).toBe(flightStepSum)
+    // Manual cutout convention — Pascal must NOT auto-cut the destination
+    // slab, otherwise our manual SlabNode.holes double up.
+    expect(stair.slabOpeningMode).toBe('none')
+  })
+
+  it('StairNode.fromLevelId / toLevelId reference real LevelNode ops', () => {
+    const plan = buildStairPlan(3)
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const levelIds = new Set(
+      ops.filter((o) => o.node.type === 'level').map((o) => o.node.id as string),
+    )
+    const stair = ops.find((o) => o.node.type === 'stair')!
+      .node as unknown as StairNodeShape
+    expect(stair.fromLevelId).not.toBeNull()
+    expect(stair.toLevelId).not.toBeNull()
+    expect(levelIds.has(stair.fromLevelId!)).toBe(true)
+    expect(levelIds.has(stair.toLevelId!)).toBe(true)
+    // From = ground (level 0), to = top (level floorCount-1).
+    expect(stair.fromLevelId).not.toBe(stair.toLevelId)
+  })
+
+  it('emits four stair-shaft walls per core per floor, each with canonicalEdgeId metadata', () => {
+    const plan = buildStairPlan(3)
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const shaftWalls = ops.filter((o) => {
+      const meta = o.node.metadata as { bimai?: { wallRole?: string } }
+      return o.node.type === 'wall' && meta?.bimai?.wallRole === 'stair-shaft'
+    })
+    expect(shaftWalls).toHaveLength(4 * 3) // 4 walls × 3 floors
+
+    // Every shaft wall must reference a canonicalEdgeId from
+    // stair.enclosingWallIds and identify which floor + which edge.
+    const canonicalIds = new Set(plan.stairs[0]!.enclosingWallIds)
+    const seenPerLevel = new Map<number, Set<number>>()
+    for (const op of shaftWalls) {
+      const bimai = (op.node.metadata as { bimai: Record<string, unknown> })
+        .bimai as {
+        canonicalEdgeId: string
+        shaftEdgeIndex: number
+        levelIndex: number
+        stairId: string
+      }
+      expect(bimai.stairId).toBe(plan.stairs[0]!.id)
+      expect(canonicalIds.has(bimai.canonicalEdgeId)).toBe(true)
+      // Pascal wall id format must match the schema regex.
+      expect(op.node.id).toMatch(/^wall_[A-Za-z0-9_-]+$/)
+      const set = seenPerLevel.get(bimai.levelIndex) ?? new Set<number>()
+      set.add(bimai.shaftEdgeIndex)
+      seenPerLevel.set(bimai.levelIndex, set)
+    }
+    // All 3 levels saw all 4 edges.
+    expect(seenPerLevel.size).toBe(3)
+    for (const [, edges] of seenPerLevel) {
+      expect(edges).toEqual(new Set([0, 1, 2, 3]))
+    }
+  })
+
+  it('ground slab has no holes; level >= 1 slabs have one hole per stair core', () => {
+    const plan = buildStairPlan(4)
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const levelOps = ops.filter((o) => o.node.type === 'level')
+    const levelIdToIndex = new Map<string, number>()
+    levelOps.forEach((o, i) => levelIdToIndex.set(o.node.id as string, i))
+    const slabs = ops
+      .filter((o) => o.node.type === 'slab')
+      .map((o) => ({
+        levelIdx: levelIdToIndex.get(o.parentId as unknown as string)!,
+        node: o.node as unknown as SlabShape,
+      }))
+    expect(slabs).toHaveLength(4)
+    for (const { levelIdx, node } of slabs) {
+      if (levelIdx === 0) {
+        expect(node.holes).toEqual([])
+        expect(node.holeMetadata).toEqual([])
+      } else {
+        expect(node.holes).toHaveLength(1)
+        expect(node.holeMetadata).toHaveLength(1)
+        expect(node.holeMetadata[0]!.source).toBe('stair')
+        expect(node.holeMetadata[0]!.stairId).toBe(plan.stairs[0]!.id)
+        // The hole polygon equals the stair shaft polygon.
+        const hole = node.holes[0]!
+        const shaft = plan.stairs[0]!.shaftPolygon
+        expect(hole).toHaveLength(shaft.length)
+        for (let i = 0; i < hole.length; i++) {
+          expect(hole[i]![0]).toBeCloseTo(shaft[i]![0], 9)
+          expect(hole[i]![1]).toBeCloseTo(shaft[i]![1], 9)
+        }
+      }
+    }
+  })
+
+  it('every StairSegment is emitted before the StairNode (children-before-parent)', () => {
+    const plan = buildStairPlan(3)
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const stairIdx = ops.findIndex((o) => o.node.type === 'stair')
+    const segIdxs = ops
+      .map((o, i) => (o.node.type === 'stair-segment' ? i : -1))
+      .filter((i) => i >= 0)
+    expect(segIdxs.length).toBeGreaterThan(0)
+    for (const i of segIdxs) expect(i).toBeLessThan(stairIdx)
+  })
+
+  it('every emitted stair / stair-segment / shaft-wall is tagged generated', () => {
+    const plan = buildStairPlan(3)
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    for (const op of ops) {
+      if (
+        op.node.type === 'stair' ||
+        op.node.type === 'stair-segment' ||
+        (op.node.type === 'wall' &&
+          ((op.node.metadata as { bimai?: { wallRole?: string } })?.bimai
+            ?.wallRole === 'stair-shaft'))
+      ) {
+        expect(isGenerated(op.node, GEN_ID)).toBe(true)
+      }
+    }
   })
 })
