@@ -80,6 +80,12 @@ const PLAN: BuildingPlan = {
   floorCount: 1,
   floorHeight: 3,
   floors: [],
+  stairs: [],
+  roof: {
+    typology: 'flat-with-parapet',
+    slabPolygon: [[10, 10], [20, 10], [20, 20], [10, 20]],
+    elevation: 3,
+  },
   warnings: [],
   params: DEFAULT_PARAMS,
 }

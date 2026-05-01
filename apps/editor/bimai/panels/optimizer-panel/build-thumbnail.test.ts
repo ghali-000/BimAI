@@ -64,6 +64,17 @@ function makePlan(opts: Partial<BuildingPlan> = {}): BuildingPlan {
     floorCount: 1,
     floorHeight: 3,
     floors: [makeFloor()],
+    stairs: [],
+    roof: {
+      typology: 'flat-with-parapet',
+      slabPolygon: [
+        [0, 0],
+        [10, 0],
+        [10, 6],
+        [0, 6],
+      ],
+      elevation: 3,
+    },
     warnings: [],
     params: DEFAULT_PARAMS,
     ...opts,

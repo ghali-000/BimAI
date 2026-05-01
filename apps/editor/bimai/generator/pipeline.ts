@@ -229,12 +229,24 @@ export function buildPlan(
     }
   }
 
+  // Phase 3-8 stairs/roof: stair placement (Task 4) lands later in the
+  // phase and will populate this array; for the duration of Task 1 we
+  // ship `[]` so the type widens without breaking the planner. The roof
+  // is always present — `flat-with-parapet` is the default residential
+  // mid-rise typology, and `slabPolygon` matches the top-floor slab
+  // outline byte-for-byte. Top-of-building elevation = floorCount × floorHeight.
   const plan: BuildingPlan = {
     generationId: nanoid(),
     footprint: footprint.polygon,
     floorCount: floorsResult.floorCount,
     floorHeight: floorsResult.floorHeight,
     floors,
+    stairs: [],
+    roof: {
+      typology: 'flat-with-parapet',
+      slabPolygon: footprint.polygon,
+      elevation: floorsResult.floorCount * floorsResult.floorHeight,
+    },
     warnings,
     params,
   }

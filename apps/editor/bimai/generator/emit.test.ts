@@ -51,6 +51,8 @@ function buildSingleFloorPlan(): BuildingPlan {
     floorCount: 1,
     floorHeight: 3,
     floors: [floor],
+    stairs: [],
+    roof: { typology: 'flat-with-parapet', slabPolygon: OUTLINE_30x10, elevation: 3 },
     warnings: [],
     params: DEFAULT_PARAMS,
   }
@@ -181,6 +183,8 @@ describe('emitBuildingPlan', () => {
           units: packed.units,
         },
       ],
+      stairs: [],
+      roof: { typology: 'flat-with-parapet', slabPolygon: OUTLINE_30x10, elevation: 3 },
       warnings: [],
       params: DEFAULT_PARAMS,
     }
@@ -283,6 +287,8 @@ describe('emitBuildingPlan', () => {
       floorCount: 0,
       floorHeight: 3,
       floors: [],
+      stairs: [],
+      roof: { typology: 'flat-with-parapet', slabPolygon: OUTLINE_30x10, elevation: 0 },
       warnings: [],
       params: DEFAULT_PARAMS,
     }
@@ -394,6 +400,8 @@ function buildRoomyFloorPlan(): BuildingPlan {
     floorCount: 1,
     floorHeight: 3,
     floors: [floor],
+    stairs: [],
+    roof: { typology: 'flat-with-parapet', slabPolygon: OUTLINE_30x10, elevation: 3 },
     warnings: [],
     params: DEFAULT_PARAMS,
   }
@@ -432,6 +440,8 @@ function buildMultiRoomFloorPlan(): BuildingPlan {
     floorCount: 1,
     floorHeight: 3,
     floors: [floor],
+    stairs: [],
+    roof: { typology: 'flat-with-parapet', slabPolygon: OUTLINE_30x10, elevation: 3 },
     warnings: [],
     params: DEFAULT_PARAMS,
   }
@@ -576,6 +586,8 @@ describe('emitBuildingPlan — room zones (Phase 3-7 Task 6)', () => {
       floors: [
         { level: 0, outline: OUTLINE_30x10, corridor, units },
       ],
+      stairs: [],
+      roof: { typology: 'flat-with-parapet', slabPolygon: OUTLINE_30x10, elevation: 3 },
       warnings: [],
       params: DEFAULT_PARAMS,
     }

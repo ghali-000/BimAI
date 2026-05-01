@@ -192,6 +192,84 @@ export interface FloorPlan {
   units: UnitPlan[]
 }
 
+/**
+ * Phase 3-8: stair core. One per fire-egress shaft. The default residential
+ * mid-rise we target ships with a single end-of-corridor core; the array
+ * shape is forward-compatible with multi-core fire-egress (Phase 3-9 once
+ * plot sizes grow past the single-core walking-distance threshold).
+ *
+ * Coords are world-space `[x, z]` matching every other plan polygon. The
+ * shaft is always rectangular in 3-8 (per the brief's anti-pattern list);
+ * `shaftPolygon` is the four-vertex CCW outer rectangle.
+ *
+ * `enclosingWallIds` are canonical-edge-hashed ids (Phase 3-7 pattern from
+ * `rooms-walls.ts`'s `cyrb128Hex` over snapped + lex-min-sorted endpoints)
+ * so the walls and the slab penetrations agree on identity across regen.
+ */
+export interface StairCorePlan {
+  /** Stable across regen. Format `stair_<12hex>`. */
+  id: string
+  /** OBB-local origin in building frame (corner of the shaft rectangle). */
+  position: [number, number]
+  /** Metres. Default 2.5 (residential template). */
+  width: number
+  /** Metres. Default 4.0 (flight + landing). */
+  depth: number
+  /** One flight per inter-floor span. `[]` for single-floor buildings. */
+  flights: StairFlightPlan[]
+  /** Outer rectangle of the stair shaft (4-vertex CCW). */
+  shaftPolygon: [number, number][]
+  /** Canonical ids of the four shaft walls. */
+  enclosingWallIds: string[]
+}
+
+export interface StairFlightPlan {
+  /** Source level index (0 = ground). */
+  fromLevel: number
+  /** Destination level index. Always `fromLevel + 1` in 3-8. */
+  toLevel: number
+  /** Metres above the building base. */
+  startElevation: number
+  /** Metres above the building base. */
+  endElevation: number
+  /** Default ~17 for 3 m floor-to-floor at 0.18 m typical riser. */
+  stepCount: number
+  /** Metres. */
+  stepHeight: number
+  /** Metres. */
+  stepDepth: number
+}
+
+/**
+ * Phase 3-8: roof plan. Always present, even on flat-without-parapet roofs
+ * (the type still records typology + slab outline so the IFC writer can
+ * emit `IfcRoof` regardless of whether parapet walls exist).
+ *
+ * `slabPolygon` matches the top-floor slab outline byte-for-byte; the
+ * top slab itself is already emitted by the floors stage and is not
+ * re-emitted by the roof stage.
+ *
+ * `parapet` is omitted when typology is `'flat-without-parapet'`. When
+ * present, `polygon` traces the slab perimeter (same vertices as
+ * `slabPolygon` for a rectangular footprint) and `wallIds[i]` is the
+ * canonical-edge id of the parapet wall along edge `i` of the polygon.
+ */
+export interface RoofPlan {
+  typology: 'flat-with-parapet' | 'flat-without-parapet' | 'pitched'
+  slabPolygon: [number, number][]
+  /** Top-of-building elevation (top slab top in metres). */
+  elevation: number
+  parapet?: {
+    polygon: [number, number][]
+    /** Metres above roof slab. Default 1.0. */
+    height: number
+    /** Metres. Default 0.15. */
+    thickness: number
+    /** Canonical ids per polygon edge. Length === polygon.length. */
+    wallIds: string[]
+  }
+}
+
 export interface BuildingPlan {
   /** Stamped onto every generated node's `metadata.bimai.generationId`. */
   generationId: string
@@ -200,6 +278,18 @@ export interface BuildingPlan {
   /** Floor-to-floor height in metres. */
   floorHeight: number
   floors: FloorPlan[]
+  /**
+   * Phase 3-8: stair cores. `[]` for single-floor buildings (no stairs
+   * needed). Multi-floor buildings ship with at least one core; the array
+   * supports 2+ for fire egress on large plots in Phase 3-9.
+   */
+  stairs: StairCorePlan[]
+  /**
+   * Phase 3-8: roof plan. Always present (even single-floor buildings get
+   * a roof — the top slab is the roof slab). Default typology is
+   * `'flat-with-parapet'` for residential mid-rise.
+   */
+  roof: RoofPlan
   /** Non-fatal issues, e.g. "could not place all studio units". */
   warnings: string[]
   /**
