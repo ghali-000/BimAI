@@ -981,6 +981,408 @@ describe('writeIFC', () => {
       expect(z).toBeCloseTo(0.42, 5)
     })
   })
+
+  // ── Phase 3-7 Task 9: room IfcSpaces with IfcRelAggregates ──────────────
+  //
+  // Room zones (metadata.bimai.{roomKind, unitId} set) emit one
+  // IfcSpace each, *not* contained in the storey directly — they're
+  // aggregated under their parent unit IfcSpace via one
+  // IfcRelAggregates per unit. The unit IfcSpace's storey containment
+  // is unchanged. Studios with no rooms (or any unit-shell fallback)
+  // emit only the unit IfcSpace; the generator's `emitRoomZones`
+  // already suppresses unit-shell zones at emit time, so the IFC
+  // writer sees zero room zones for those units naturally.
+  describe('room IfcSpaces (Phase 3-7 Task 9)', () => {
+    interface RoomSpec {
+      id: string
+      kind: string
+    }
+    interface UnitWithRooms {
+      unitId: string
+      unitName: string
+      rooms: RoomSpec[]
+    }
+
+    /**
+     * Build a scene with the standard spine (site/building/level/slab/wall)
+     * plus N unit zones, each with its own room zones. Reuses `buildScene`
+     * for the spine to keep this helper short. The default fixture's zone
+     * is omitted — we build all zones here.
+     */
+    function buildSceneWithUnits(
+      units: UnitWithRooms[],
+    ): { scene: SceneSnapshot; ids: SceneIds } {
+      const { scene, ids } = buildScene({
+        withDoor: false,
+        withWindow: false,
+        withZone: false,
+      })
+      let xOffset = 0
+      for (const unit of units) {
+        const unitZone = {
+          object: 'node',
+          id: unit.unitId,
+          type: 'zone',
+          parentId: ids.level,
+          name: unit.unitName,
+          visible: true,
+          metadata: {},
+          polygon: [
+            [xOffset, 0],
+            [xOffset + 8, 0],
+            [xOffset + 8, 8],
+            [xOffset, 8],
+          ],
+          color: '#a78bfa',
+        } as unknown as ZoneNode
+        scene.nodes[unit.unitId as AnyNodeId] = unitZone as unknown as AnyNode
+        // Slice the unit's 8×8 footprint into N horizontal strips, one
+        // per room. Geometry doesn't matter for the IFC structural specs;
+        // we only need every room to have a valid 4-vertex polygon.
+        const stripH = unit.rooms.length > 0 ? 8 / unit.rooms.length : 0
+        unit.rooms.forEach((room, i) => {
+          const y0 = i * stripH
+          const y1 = y0 + stripH
+          const roomZone = {
+            object: 'node',
+            id: room.id,
+            type: 'zone',
+            parentId: ids.level,
+            name: `${unit.unitName} · ${room.kind}`,
+            visible: true,
+            metadata: {
+              bimai: {
+                roomKind: room.kind,
+                unitId: unit.unitId,
+                unitType: unit.unitName,
+                roomArea: 16,
+                windowAccess: false,
+              },
+            },
+            polygon: [
+              [xOffset, y0],
+              [xOffset + 8, y0],
+              [xOffset + 8, y1],
+              [xOffset, y1],
+            ],
+            color: '#3b82f6',
+          } as unknown as ZoneNode
+          scene.nodes[room.id as AnyNodeId] = roomZone as unknown as AnyNode
+        })
+        xOffset += 10
+      }
+      return { scene, ids }
+    }
+
+    /**
+     * Build a Map<expressID, {type, args}> from the STEP text. Used by
+     * specs that need to walk relationships (IfcRelAggregates →
+     * RelatingObject + RelatedObjects).
+     */
+    function parseEntities(text: string): Map<number, { type: string; args: string }> {
+      const entities = new Map<number, { type: string; args: string }>()
+      const ENT_RE = /^#(\d+)=([A-Z0-9_]+)\(((?:[^()]|\([^()]*\))*)\)/gm
+      for (const m of text.matchAll(ENT_RE)) {
+        entities.set(Number(m[1]), { type: m[2]!, args: m[3]! })
+      }
+      return entities
+    }
+
+    /** Resolve `(#1,#2,#3)` → [1, 2, 3]. Tolerates `$`. */
+    function parseRefList(s: string): number[] {
+      const inner = s.replace(/^\(/, '').replace(/\)$/, '')
+      if (inner === '' || inner === '$') return []
+      return inner
+        .split(',')
+        .map((p) => p.trim())
+        .filter((p) => p.startsWith('#'))
+        .map((p) => Number(p.slice(1)))
+    }
+
+    it('1 unit + 4 rooms → 1 unit IfcSpace + 4 room IfcSpaces + 1 IfcRelAggregates linking them', async () => {
+      const { scene } = buildSceneWithUnits([
+        {
+          unitId: 'zone_unit_1br_a',
+          unitName: '1BR',
+          rooms: [
+            { id: 'zone_room_a_bed', kind: 'bedroom' },
+            { id: 'zone_room_a_bath', kind: 'bathroom' },
+            { id: 'zone_room_a_kit', kind: 'kitchen' },
+            { id: 'zone_room_a_liv', kind: 'living' },
+          ],
+        },
+      ])
+      const { text } = await runWrite(scene)
+      const entities = parseEntities(text)
+
+      const spaces = [...entities.values()].filter((e) => e.type === 'IFCSPACE')
+      expect(spaces.length).toBe(5) // 1 unit + 4 rooms
+
+      const aggs = [...entities.values()].filter((e) => e.type === 'IFCRELAGGREGATES')
+      // Storey ←IfcRelAggregates→ building (1), building ←Aggregates→ site (1),
+      // site ←Aggregates→ project (1), unit ←Aggregates→ rooms (1) = at least 4.
+      // The Phase 3-7 addition is exactly one *unit-rooms* aggregate.
+      const unitRoomsAggs = aggs.filter((e) => {
+        const args = splitTopLevel(e.args)
+        const related = parseRefList(args[5]!)
+        // Find aggregates whose all related are IfcSpace.
+        if (related.length !== 4) return false
+        return related.every((id) => entities.get(id)?.type === 'IFCSPACE')
+      })
+      expect(unitRoomsAggs.length).toBe(1)
+    })
+
+    it('Studio with no rooms → only unit IfcSpace, no IfcRelAggregates linking room spaces', async () => {
+      const { scene } = buildSceneWithUnits([
+        { unitId: 'zone_unit_studio_a', unitName: 'Studio', rooms: [] },
+      ])
+      const { text } = await runWrite(scene)
+      const entities = parseEntities(text)
+
+      const spaces = [...entities.values()].filter((e) => e.type === 'IFCSPACE')
+      expect(spaces.length).toBe(1)
+
+      const aggs = [...entities.values()].filter((e) => e.type === 'IFCRELAGGREGATES')
+      const spaceAggs = aggs.filter((e) => {
+        const args = splitTopLevel(e.args)
+        const relating = Number(args[4]!.slice(1))
+        return entities.get(relating)?.type === 'IFCSPACE'
+      })
+      expect(spaceAggs.length).toBe(0)
+    })
+
+    it('mixed scene (2 units with rooms, 1 unit-shell) → counts match', async () => {
+      const { scene } = buildSceneWithUnits([
+        {
+          unitId: 'zone_unit_1br',
+          unitName: '1BR',
+          rooms: [
+            { id: 'zone_room_1br_bed', kind: 'bedroom' },
+            { id: 'zone_room_1br_bath', kind: 'bathroom' },
+          ],
+        },
+        {
+          unitId: 'zone_unit_2br',
+          unitName: '2BR',
+          rooms: [
+            { id: 'zone_room_2br_bed1', kind: 'bedroom' },
+            { id: 'zone_room_2br_bed2', kind: 'bedroom' },
+            { id: 'zone_room_2br_bath', kind: 'bathroom' },
+          ],
+        },
+        // unit-shell unit: emitRoomZones suppresses the shell zone, so
+        // here we model the post-emit state — only the unit zone, no
+        // children. Same path the IFC writer sees in production.
+        { unitId: 'zone_unit_studio', unitName: 'Studio', rooms: [] },
+      ])
+      const { text } = await runWrite(scene)
+      const entities = parseEntities(text)
+
+      const spaces = [...entities.values()].filter((e) => e.type === 'IFCSPACE')
+      // 3 units + (2 + 3) rooms = 8.
+      expect(spaces.length).toBe(8)
+
+      const aggs = [...entities.values()].filter((e) => e.type === 'IFCRELAGGREGATES')
+      const spaceAggs = aggs.filter((e) => {
+        const args = splitTopLevel(e.args)
+        const relating = Number(args[4]!.slice(1))
+        return entities.get(relating)?.type === 'IFCSPACE'
+      })
+      // 2 unit-with-rooms → 2 IfcRelAggregates. Studio (no rooms) → 0.
+      expect(spaceAggs.length).toBe(2)
+    })
+
+    it('LongName populated correctly for every roomKind (bedroom, bathroom, kitchen, living, hallway)', async () => {
+      const { scene } = buildSceneWithUnits([
+        {
+          unitId: 'zone_unit_4br',
+          unitName: '4BR',
+          rooms: [
+            { id: 'zone_room_bed', kind: 'bedroom' },
+            { id: 'zone_room_bath', kind: 'bathroom' },
+            { id: 'zone_room_kit', kind: 'kitchen' },
+            { id: 'zone_room_liv', kind: 'living' },
+            { id: 'zone_room_hall', kind: 'hallway' },
+          ],
+        },
+      ])
+      const { text } = await runWrite(scene)
+
+      // Each LongName is on the IfcSpace at positional index 7
+      // (...,Representation,LongName,CompositionType,...). The simplest
+      // check: the bare roomKind label appears as its own quoted string
+      // somewhere in an IFCSPACE line. Pair with the unit-prefixed Name
+      // assertion to lock both fields.
+      for (const kind of ['bedroom', 'bathroom', 'kitchen', 'living', 'hallway']) {
+        const spaceLineRe = new RegExp(`IFCSPACE\\([^\\n]*'${kind}'[^\\n]*`)
+        expect(text).toMatch(spaceLineRe)
+        // Unit-prefixed Name: "4BR - bedroom" etc.
+        expect(text).toContain(`'4BR - ${kind}'`)
+      }
+    })
+
+    it('storey containment unchanged: unit IfcSpaces still appear in IfcRelContainedInSpatialStructure, room IfcSpaces do not', async () => {
+      const { scene } = buildSceneWithUnits([
+        {
+          unitId: 'zone_unit_1br',
+          unitName: '1BR',
+          rooms: [
+            { id: 'zone_room_bed', kind: 'bedroom' },
+            { id: 'zone_room_bath', kind: 'bathroom' },
+          ],
+        },
+      ])
+      const { text } = await runWrite(scene)
+      const entities = parseEntities(text)
+
+      const containment = [...entities.values()].find(
+        (e) => e.type === 'IFCRELCONTAINEDINSPATIALSTRUCTURE',
+      )
+      expect(containment).toBeDefined()
+      const args = splitTopLevel(containment!.args)
+      // RelatedElements is positional index 4 ((#1,#2,...)).
+      const related = parseRefList(args[4]!)
+      const relatedTypes = related.map((id) => entities.get(id)?.type)
+
+      // Exactly one IfcSpace in containment (the unit). Room spaces
+      // must not be in this list — they reach the storey transitively
+      // via the unit's IfcRelAggregates.
+      const spaceIds = related.filter((id) => entities.get(id)?.type === 'IFCSPACE')
+      expect(spaceIds.length).toBe(1)
+      // Other building elements (slab, wall) are still contained directly
+      // — guard the regression.
+      expect(relatedTypes).toContain('IFCSLAB')
+      expect(relatedTypes).toContain('IFCWALLSTANDARDCASE')
+    })
+
+    it('room IfcSpace GUID is deterministic across runs (same scene + same projectSalt → same GUID)', async () => {
+      const build = () =>
+        buildSceneWithUnits([
+          {
+            unitId: 'zone_unit_1br',
+            unitName: '1BR',
+            rooms: [{ id: 'zone_room_bed', kind: 'bedroom' }],
+          },
+        ])
+
+      const { text: text1 } = await runWrite(build().scene, 'lock-salt')
+      __resetIfcApiForTests()
+      const { text: text2 } = await runWrite(build().scene, 'lock-salt')
+
+      // Pull the IfcSpace whose Name contains '1BR - bedroom' from each
+      // run; their GlobalId (positional index 0) must match.
+      const guidFor = (text: string): string => {
+        const m = text.match(/IFCSPACE\('([^']+)',[^)]*'1BR - bedroom'/)
+        if (!m) throw new Error('room IfcSpace not found in STEP output')
+        return m[1]!
+      }
+      expect(guidFor(text1)).toBe(guidFor(text2))
+    })
+
+    it('tag invariant: every room IfcSpace is the target of exactly one IfcRelAggregates whose RelatingObject is a unit IfcSpace', async () => {
+      const { scene } = buildSceneWithUnits([
+        {
+          unitId: 'zone_unit_1br',
+          unitName: '1BR',
+          rooms: [
+            { id: 'zone_room_bed', kind: 'bedroom' },
+            { id: 'zone_room_bath', kind: 'bathroom' },
+          ],
+        },
+        {
+          unitId: 'zone_unit_2br',
+          unitName: '2BR',
+          rooms: [
+            { id: 'zone_room_bed2', kind: 'bedroom' },
+            { id: 'zone_room_kit2', kind: 'kitchen' },
+            { id: 'zone_room_liv2', kind: 'living' },
+          ],
+        },
+      ])
+      const { text } = await runWrite(scene)
+      const entities = parseEntities(text)
+
+      // Build the set of all room-IfcSpace IDs (those with LongName set).
+      // Easier: collect IfcSpaces whose Name contains " - " (the unit-
+      // prefixed naming convention).
+      const roomSpaceIds = new Set<number>()
+      for (const [id, e] of entities) {
+        if (e.type !== 'IFCSPACE') continue
+        const args = splitTopLevel(e.args)
+        const name = args[2]!
+        if (name.includes(' - ')) roomSpaceIds.add(id)
+      }
+      expect(roomSpaceIds.size).toBe(5)
+
+      // For each room space, count incoming IfcRelAggregates whose
+      // RelatingObject is an IfcSpace. Must be exactly 1.
+      for (const roomId of roomSpaceIds) {
+        let parents = 0
+        for (const e of entities.values()) {
+          if (e.type !== 'IFCRELAGGREGATES') continue
+          const args = splitTopLevel(e.args)
+          const relating = Number(args[4]!.slice(1))
+          const related = parseRefList(args[5]!)
+          if (
+            related.includes(roomId) &&
+            entities.get(relating)?.type === 'IFCSPACE'
+          ) {
+            parents++
+          }
+        }
+        expect(parents).toBe(1)
+      }
+    })
+
+    it('round-trip: 4 units (3 with rooms, 1 unit-shell) → 4 unit IfcSpaces + Σrooms IfcSpaces + 3 IfcRelAggregates', async () => {
+      // Scaled-down version of the brief's 14-unit fixture (each unit
+      // emits the same 5+ entities chain, so 4 units already exercises
+      // the loop without ballooning test-runtime). Shape: 1BR×2 (2
+      // bedrooms+bathroom each), 2BR×1 (3 rooms), Studio×1 (no rooms).
+      const { scene } = buildSceneWithUnits([
+        {
+          unitId: 'zone_unit_1br_a',
+          unitName: '1BR',
+          rooms: [
+            { id: 'zone_room_a_bed', kind: 'bedroom' },
+            { id: 'zone_room_a_bath', kind: 'bathroom' },
+          ],
+        },
+        {
+          unitId: 'zone_unit_1br_b',
+          unitName: '1BR',
+          rooms: [
+            { id: 'zone_room_b_bed', kind: 'bedroom' },
+            { id: 'zone_room_b_bath', kind: 'bathroom' },
+          ],
+        },
+        {
+          unitId: 'zone_unit_2br',
+          unitName: '2BR',
+          rooms: [
+            { id: 'zone_room_2br_bed1', kind: 'bedroom' },
+            { id: 'zone_room_2br_bed2', kind: 'bedroom' },
+            { id: 'zone_room_2br_kit', kind: 'kitchen' },
+          ],
+        },
+        { unitId: 'zone_unit_studio', unitName: 'Studio', rooms: [] },
+      ])
+      const { text } = await runWrite(scene)
+      const entities = parseEntities(text)
+
+      const spaces = [...entities.values()].filter((e) => e.type === 'IFCSPACE')
+      // 4 units + (2 + 2 + 3 + 0) rooms = 11.
+      expect(spaces.length).toBe(11)
+
+      const aggs = [...entities.values()].filter((e) => e.type === 'IFCRELAGGREGATES')
+      const unitRoomAggs = aggs.filter((e) => {
+        const args = splitTopLevel(e.args)
+        const relating = Number(args[4]!.slice(1))
+        return entities.get(relating)?.type === 'IFCSPACE'
+      })
+      expect(unitRoomAggs.length).toBe(3) // Studio contributes 0.
+    })
+  })
 })
 
 /**

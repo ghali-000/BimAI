@@ -499,11 +499,71 @@ function emitLevel(
     standardPset(ctx, 'Pset_WindowCommon', commonPropsForWindow(bim), [ent], win.id)
   }
 
+  // Zones split into unit zones (no `roomKind` metadata) and room zones
+  // (`roomKind` set, `unitId` set — Phase 3-7 Task 6 emission). The IFC
+  // mapping (Phase 3-7 Task 9):
+  //
+  //   - storey ─IfcRelContainedInSpatialStructure─▶ unit IfcSpace(s)
+  //   - unit IfcSpace ─IfcRelAggregates─▶ room IfcSpace(s)
+  //
+  // Room IfcSpaces deliberately do NOT enter `contained` — IFC reserves
+  // a single decomposition relationship per element, and the unit-as-
+  // parent aggregation is the more useful one (BIMcollab and Solibri
+  // expand units to reveal rooms). The unit IfcSpace stays in `contained`
+  // so storey navigation still finds every habitable space directly under
+  // it. Studios that fall back to unit-shell emit only the unit IfcSpace
+  // — `emitRoomZones` already suppresses unit-shell room zones at emit
+  // time, so this loop sees zero room zones for those units naturally.
+  // Same path for 3BR/4BR units that fall back to unit-shell when the
+  // packer's strip depth pushes them outside the area-band gate.
   const zones = childrenOf<ZoneNode>(scene, levelNode.id, 'zone')
+  const unitZones: ZoneNode[] = []
+  const roomZonesByUnitId = new Map<string, ZoneNode[]>()
   for (const zone of zones) {
-    const ent = emitZone(ctx, zone, placement, bodyContext, elevation, floorToFloorHeightM)
-    contained.push(ent as unknown as IFC4.IfcProduct)
-    standardPset(ctx, 'Pset_SpaceCommon', commonPropsForSpace(), [ent], zone.id)
+    const meta = getRoomZoneMeta(zone)
+    if (meta) {
+      const list = roomZonesByUnitId.get(meta.unitId) ?? []
+      list.push(zone)
+      roomZonesByUnitId.set(meta.unitId, list)
+    } else {
+      unitZones.push(zone)
+    }
+  }
+  for (const unitZone of unitZones) {
+    const unitSpace = emitZone(ctx, unitZone, placement, bodyContext, elevation, floorToFloorHeightM)
+    contained.push(unitSpace as unknown as IFC4.IfcProduct)
+    standardPset(ctx, 'Pset_SpaceCommon', commonPropsForSpace(), [unitSpace], unitZone.id)
+
+    const rooms = roomZonesByUnitId.get(unitZone.id) ?? []
+    if (rooms.length === 0) continue
+
+    const roomSpaces: IFC4.IfcSpace[] = []
+    for (const roomZone of rooms) {
+      const meta = getRoomZoneMeta(roomZone)!
+      const roomSpace = emitZone(
+        ctx,
+        roomZone,
+        placement,
+        bodyContext,
+        elevation,
+        floorToFloorHeightM,
+        {
+          // `${unitType} - ${roomKind}` for IfcSpace.Name — keeps the unit
+          // prefix so a flat list of names still reads "1BR - bedroom"
+          // even if a viewer doesn't render the IfcRelAggregates tree.
+          // LongName = bare roomKind (matches the Phase 3-7 Task 6
+          // schedule contract: roomKind is the canonical kind label).
+          name: `${unitZone.name} - ${meta.roomKind}`,
+          longName: meta.roomKind,
+        },
+      )
+      standardPset(ctx, 'Pset_SpaceCommon', commonPropsForSpace(), [roomSpace], roomZone.id)
+      roomSpaces.push(roomSpace)
+    }
+    // One IfcRelAggregates per unit (not per room) — N rooms attach with
+    // a single relationship, which BIMcollab Zoom and other viewers
+    // collapse to one tree branch instead of N siblings.
+    aggregate(ctx, unitSpace, roomSpaces, `${unitZone.id}-rooms`)
   }
 
   if (contained.length > 0) {
@@ -755,6 +815,15 @@ function emitWindow(
   return win
 }
 
+/**
+ * Emit a zone as an IfcSpace.
+ *
+ * `options.name` overrides the IfcSpace.Name (default: `zoneNode.name`);
+ * `options.longName` populates IfcSpatialElement.LongName, which is
+ * `null` by default. Phase 3-7 Task 9 uses the override to give room
+ * IfcSpaces a "${unitType} - ${roomKind}" name and a bare
+ * "${roomKind}" LongName for viewer property panels.
+ */
 function emitZone(
   ctx: IfcWriteContext,
   zoneNode: ZoneNode,
@@ -762,6 +831,7 @@ function emitZone(
   bodyContext: IFC4.IfcGeometricRepresentationSubContext,
   storeyElevation: number,
   floorToFloorHeightM: number,
+  options: { name?: string; longName?: string } = {},
 ): IFC4.IfcSpace {
   void storeyElevation
   const placement = localPlacement(ctx, [0, 0, 0], parentPlacement)
@@ -772,12 +842,12 @@ function emitZone(
   const space = new IFC4.IfcSpace(
     ifcGuid(ctx, zoneNode.id, ''),
     ctx.ownerHistory,
-    new IFC4.IfcLabel(zoneNode.name),
+    new IFC4.IfcLabel(options.name ?? zoneNode.name),
     null,
     null,
     placement,
     shape,
-    null,
+    options.longName != null ? new IFC4.IfcLabel(options.longName) : null,
     IFC4.IfcElementCompositionEnum.ELEMENT,
     IFC4.IfcSpaceTypeEnum.INTERNAL,
     null,
@@ -1055,6 +1125,24 @@ function getBim(node: AnyNode): ComponentBIM | undefined {
   const bim = (bimai as { bim?: unknown }).bim
   if (!bim || typeof bim !== 'object') return undefined
   return bim as ComponentBIM
+}
+
+/**
+ * Phase 3-7 Task 6 room-zone discriminator. A zone is a *room* zone
+ * (not a unit zone) iff its metadata carries `bimai.roomKind` and
+ * `bimai.unitId`; both fields are written by `emitRoomZones` in the
+ * generator. Returns `null` for unit zones, so the IFC writer's split
+ * into unit/room buckets stays a one-line check.
+ */
+function getRoomZoneMeta(node: AnyNode): { roomKind: string; unitId: string } | null {
+  const md = (node as { metadata?: unknown }).metadata
+  if (!md || typeof md !== 'object') return null
+  const bimai = (md as { bimai?: unknown }).bimai
+  if (!bimai || typeof bimai !== 'object') return null
+  const roomKind = (bimai as { roomKind?: unknown }).roomKind
+  const unitId = (bimai as { unitId?: unknown }).unitId
+  if (typeof roomKind !== 'string' || typeof unitId !== 'string') return null
+  return { roomKind, unitId }
 }
 
 /** Centred 4-point rectangle polygon (closed by `polygonProfile`). */
