@@ -1724,6 +1724,191 @@ describe('writeIFC', () => {
       expect((text.match(/IFCSTAIRFLIGHT\(/g) ?? []).length).toBe(2)
     })
 
+    // Phase 3-9 Task 7 — ramped stair flight geometry. Phase 3-8
+    // emitted flat-box flights (`IfcExtrudedAreaSolid` along +Z); 3-9
+    // upgrades to a sloped extrusion so BIMcollab Zoom and Solibri
+    // render the flight as an inclined slab. The IFC primitive is the
+    // same — only `ExtrudedDirection` and the profile dimensions
+    // change.
+    describe('ramped stair flights (Phase 3-9 Task 7)', () => {
+      // Pull the IfcExtrudedAreaSolid behind each IfcStairFlight by
+      // walking IfcShapeRepresentation → Items → IfcExtrudedAreaSolid.
+      function findFlightSolids(
+        entities: Map<number, { type: string; args: string }>,
+      ): Array<{ flightId: number; solid: { type: string; args: string } }> {
+        const out: Array<{ flightId: number; solid: { type: string; args: string } }> = []
+        for (const [flightId, e] of entities) {
+          if (e.type !== 'IFCSTAIRFLIGHT') continue
+          const flightArgs = splitTopLevel(e.args)
+          // IfcStairFlight ObjectPlacement arg index 5; Representation 6.
+          const repId = Number(flightArgs[6]!.slice(1))
+          const productShape = entities.get(repId)
+          if (!productShape || productShape.type !== 'IFCPRODUCTDEFINITIONSHAPE')
+            continue
+          const productArgs = splitTopLevel(productShape.args)
+          const repIds = parseRefList(productArgs[2]!)
+          for (const rid of repIds) {
+            const shapeRep = entities.get(rid)
+            if (!shapeRep || shapeRep.type !== 'IFCSHAPEREPRESENTATION') continue
+            const shapeArgs = splitTopLevel(shapeRep.args)
+            const itemIds = parseRefList(shapeArgs[3]!)
+            for (const iid of itemIds) {
+              const item = entities.get(iid)
+              if (item?.type === 'IFCEXTRUDEDAREASOLID') {
+                out.push({ flightId, solid: item })
+              }
+            }
+          }
+        }
+        return out
+      }
+
+      function parseDirectionRatios(entities: Map<number, { type: string; args: string }>, dirId: number): [number, number, number] {
+        const dir = entities.get(dirId)!
+        // IfcDirection.DirectionRatios is the only arg; parse the
+        // `(x, y, z)` list literal.
+        const m = dir.args.match(/\(\s*([^)]+)\s*\)/)!
+        const parts = m[1]!.split(',').map((s) => Number(s.trim()))
+        return [parts[0]!, parts[1]!, parts[2]!]
+      }
+
+      // Pick the IfcExtrudedAreaSolid whose ExtrudedDirection has a
+      // non-zero Z component — that's the sloped stair flight body.
+      // The other stair-flight body in `buildSceneWithStair` is a
+      // landing (height=0, segmentType='landing'), which still
+      // extrudes axis-aligned along +Z and is excluded from sloped
+      // assertions.
+      function findSlopedFlightSolid(
+        entities: Map<number, { type: string; args: string }>,
+      ): { type: string; args: string } | null {
+        const all = findFlightSolids(entities)
+        for (const { solid } of all) {
+          const args = splitTopLevel(solid.args)
+          const dirId = Number(args[2]!.slice(1))
+          const [, dy] = parseDirectionRatios(entities, dirId)
+          if (Math.abs(dy) > 1e-6) return solid
+        }
+        return null
+      }
+
+      it('the stair-segment IfcExtrudedAreaSolid has a sloped ExtrudedDirection (non-zero Y and Z)', async () => {
+        const { scene } = buildSceneWithStair()
+        const { text } = await runWrite(scene)
+        const entities = parseEntities(text)
+        const sloped = findSlopedFlightSolid(entities)
+        expect(sloped, 'expected exactly one sloped flight solid').toBeTruthy()
+        const args = splitTopLevel(sloped!.args)
+        const dirId = Number(args[2]!.slice(1))
+        const [dx, dy, dz] = parseDirectionRatios(entities, dirId)
+        // Slope direction in IFC frame: (0, run/L, rise/L) — both Y and Z positive.
+        expect(dx).toBeCloseTo(0, 6)
+        expect(dy).toBeGreaterThan(0)
+        expect(dz).toBeGreaterThan(0)
+        // Unit-vector invariant.
+        expect(Math.hypot(dx, dy, dz)).toBeCloseTo(1, 6)
+      })
+
+      it('extrude depth equals the slope length √(run² + rise²) within float tolerance', async () => {
+        const { scene } = buildSceneWithStair()
+        const { text } = await runWrite(scene)
+        const entities = parseEntities(text)
+        const sloped = findSlopedFlightSolid(entities)
+        expect(sloped).toBeTruthy()
+        const args = splitTopLevel(sloped!.args)
+        // run=3, rise=1.5 from the seg1 fixture. Slope = √(9+2.25)=√11.25.
+        const expected = Math.hypot(3, 1.5)
+        const depth = Number(args[args.length - 1]!.match(/-?\d+(?:\.\d+)?/)![0])
+        expect(depth).toBeCloseTo(expected, 3)
+      })
+
+      it('NumberOfRiser, NumberOfTreads, RiserHeight, TreadLength match the stair-segment metrics', async () => {
+        const { scene } = buildSceneWithStair()
+        const { text } = await runWrite(scene)
+        const entities = parseEntities(text)
+        // Pick only the stair-segment flight (the landing has
+        // stepCount=0 → null metrics in the IfcStairFlight).
+        const flights = [...entities.values()].filter((e) => {
+          if (e.type !== 'IFCSTAIRFLIGHT') return false
+          const args = splitTopLevel(e.args)
+          // NumberOfRiser is `null` ($) for landings.
+          return args[8]!.trim() !== '$'
+        })
+        expect(flights, 'expected one stair-segment flight').toHaveLength(1)
+        const args = splitTopLevel(flights[0]!.args)
+        // IfcStairFlight: GUID, OwnerHistory, Name, Description,
+        // ObjectType, ObjectPlacement, Representation, Tag,
+        // NumberOfRiser, NumberOfTreads, RiserHeight, TreadLength, *
+        const numRiser = Number(args[8]!.trim().replace(/\.$/, ''))
+        const numTreads = Number(args[9]!.trim().replace(/\.$/, ''))
+        const riserH = Number(args[10]!.trim())
+        const treadL = Number(args[11]!.trim())
+        expect(numRiser).toBe(8)
+        expect(numTreads).toBe(7)
+        expect(riserH).toBeCloseTo(1.5 / 8, 6)
+        expect(treadL).toBeCloseTo(3 / 7, 6)
+      })
+
+      it('the geometric round-trip end-position matches dir × depth (slope tip lands at the expected (run, rise) offset)', async () => {
+        const { scene } = buildSceneWithStair()
+        const { text } = await runWrite(scene)
+        const entities = parseEntities(text)
+        const sloped = findSlopedFlightSolid(entities)
+        expect(sloped).toBeTruthy()
+        const args = splitTopLevel(sloped!.args)
+        const dirId = Number(args[2]!.slice(1))
+        const [dx, dy, dz] = parseDirectionRatios(entities, dirId)
+        const depth = Number(args[args.length - 1]!.match(/-?\d+(?:\.\d+)?/)![0])
+        // dir is a unit vector; dir × depth recovers (run, rise)
+        // along (Y, Z) of the solid's local frame.
+        expect(dx * depth).toBeCloseTo(0, 3)
+        expect(dy * depth).toBeCloseTo(3, 3)
+        expect(dz * depth).toBeCloseTo(1.5, 3)
+      })
+
+      it('zero-rise stair (degenerate) and landings stay flat-box (axis-aligned +Z extrusion)', async () => {
+        // Build a scene with a single landing segment (height=0,
+        // segmentType='landing') and verify the extrude direction is
+        // (0,0,1) — Phase 3-8 behaviour preserved for non-stair
+        // segments.
+        const { scene, ids } = buildScene({ withDoor: false, withWindow: false, withZone: false })
+        const stairId = 'stair_landing_001'
+        const landingId = 'sseg_landing_001'
+        scene.nodes[stairId as AnyNodeId] = {
+          object: 'node', id: stairId, type: 'stair', parentId: ids.building,
+          name: 'Stair', visible: true, metadata: {},
+          position: [0, 0, 0], rotation: 0, stairType: 'straight',
+          fromLevelId: ids.level, toLevelId: null,
+          width: 1.2, totalRise: 0, stepCount: 0, thickness: 0.2,
+          children: [landingId],
+        } as unknown as AnyNode
+        scene.nodes[landingId as AnyNodeId] = {
+          object: 'node', id: landingId, type: 'stair-segment', parentId: stairId,
+          name: 'Landing', visible: true, metadata: {},
+          position: [0, 0, 0], rotation: 0, segmentType: 'landing',
+          width: 1.2, length: 1.5, height: 0, stepCount: 0,
+          attachmentSide: 'front', fillToFloor: true, thickness: 0.2,
+        } as unknown as AnyNode
+        const { text } = await runWrite(scene)
+        const entities = parseEntities(text)
+        const solids = findFlightSolids(entities)
+        expect(solids).toHaveLength(1)
+        const args = splitTopLevel(solids[0]!.solid.args)
+        const dirId = Number(args[2]!.slice(1))
+        const [dx, dy, dz] = parseDirectionRatios(entities, dirId)
+        expect(dx).toBeCloseTo(0, 6)
+        expect(dy).toBeCloseTo(0, 6)
+        expect(dz).toBeCloseTo(1, 6)
+      })
+
+      it('STEP output is byte-identical for the same scene + same salt (determinism preserved)', async () => {
+        const { scene } = buildSceneWithStair()
+        const { text: a } = await runWrite(scene, 'phase-3-9-task-7-salt')
+        __resetIfcApiForTests()
+        const { text: b } = await runWrite(scene, 'phase-3-9-task-7-salt')
+        expect(a).toEqual(b)
+      })
+    })
+
     it('emits both stairs when the scene has one level-parented and one building-parented (mixed shape)', async () => {
       const { scene, ids } = buildSceneWithStair()
       // Add a second stair parented to the building (legacy shape).

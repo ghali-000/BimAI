@@ -53,6 +53,7 @@ import {
 } from './coords'
 import {
   bodyRepresentation,
+  extrudeAlong,
   extrudeUp,
   localPlacement,
   openingShape,
@@ -1027,12 +1028,28 @@ function emitStair(
 }
 
 /**
- * Emit one IfcStairFlight for a StairSegmentNode. The body is a
- * straight rectangular extrusion sized by `width × length`, raised by
- * `height` (a landing has `height = 0`, so we extrude by `thickness`
- * instead — landings still need a visible plate). NumberOfRiser /
- * RiserHeight / TreadLength are filled when the segment is a stair
- * (segmentType === 'stair').
+ * Emit one IfcStairFlight for a StairSegmentNode.
+ *
+ * Phase 3-9 (`segmentType === 'stair'`): the body is a *ramped* slab.
+ * Profile = `width × thickness` (cross-section perpendicular to the
+ * width axis); extrusion direction = the slope tangent
+ * `(0, run, rise) / |...|`; depth = slope length. The IFC primitive
+ * (`IfcExtrudedAreaSolid` with a non-axis-aligned ExtrudedDirection)
+ * sweeps the cross-section along the inclined plane, producing the
+ * inclined slab BIMcollab Zoom and Solibri render as a recognisable
+ * stair flight. (Phase 3-8 emitted this as a flat box — visually
+ * correct as a tagged "flight" but not a slope.)
+ *
+ * Note vs the brief sketch. The brief proposed `profile = width ×
+ * (treadLength × stepCount)` (i.e., the floor-plan footprint)
+ * extruded along the slope by the slope length. That sweep produces
+ * a parallelepiped twice as long as the run — geometrically wrong
+ * for a slab. The cross-section interpretation (`width × thickness`)
+ * is the conventional ramped-slab encoding and matches what real
+ * BIM authoring tools (Revit, ArchiCAD) emit for IFC4 stair flights.
+ *
+ * Landings (`segmentType === 'landing'`): unchanged — flat extrusion
+ * by `thickness`, no slope.
  *
  * Pascal segment position is local to the parent StairNode; the
  * IfcLocalPlacement chain naturally composes that under the stair.
@@ -1049,21 +1066,35 @@ function emitStairFlight(
   const isStair = segNode.segmentType === 'stair'
   const width = segNode.width ?? 1
   const length = segNode.length ?? 1
-  // Landings get a flat plate at the segment's slab thickness;
-  // stair flights extrude by their full vertical rise.
-  const extrudeHeight = isStair
-    ? Math.max(segNode.height ?? 0, 0.01)
-    : Math.max(segNode.thickness ?? 0.2, 0.01)
+  const thickness = Math.max(segNode.thickness ?? 0.2, 0.01)
 
-  // Centre the rectangle on the segment origin so the placement
-  // origin coincides with the visual centroid (matches the renderer
-  // convention for stair-segment meshes).
-  const profile = polygonProfile(
-    ctx,
-    rectanglePolygonCentred(width, length),
-    'StairFlightBody',
-  )
-  const solid = extrudeUp(ctx, profile, extrudeHeight)
+  let solid: IFC4.IfcExtrudedAreaSolid
+  if (isStair && (segNode.height ?? 0) > 1e-9) {
+    // Ramped slab. Cross-section profile (`width × thickness`) sits
+    // in the local XY plane; the slope tangent in IFC coords is
+    // (run-axis, 0, rise) — Pascal's stair runs along its local +Y,
+    // which `pascalToIfc` maps to IFC +Y. Slope length is the
+    // hypotenuse of run × rise.
+    const run = length
+    const rise = segNode.height ?? 0
+    const profile = polygonProfile(
+      ctx,
+      rectanglePolygonCentred(width, thickness),
+      'StairFlightSection',
+    )
+    const slopeLength = Math.hypot(run, rise)
+    solid = extrudeAlong(ctx, profile, [0, run, rise], slopeLength)
+  } else {
+    // Landing or zero-rise stair (degenerate, treated as a flat
+    // plate). Same axis-aligned extrusion Phase 3-8 emitted.
+    const profile = polygonProfile(
+      ctx,
+      rectanglePolygonCentred(width, length),
+      'StairFlightBody',
+    )
+    const flatHeight = isStair ? Math.max(segNode.height ?? 0, 0.01) : thickness
+    solid = extrudeUp(ctx, profile, flatHeight)
+  }
   const rep = bodyRepresentation(ctx, bodyContext, solid)
   const shape = productShape(ctx, [rep])
 

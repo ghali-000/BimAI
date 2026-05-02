@@ -182,8 +182,7 @@ function rectangleProfile(
 
 /**
  * Vertical extrusion. The profile sweeps along +Z (IFC up) — every
- * building element this writer emits is plumb, so we hard-code the
- * direction here rather than threading it through every helper.
+ * plumb building element this writer emits goes through here.
  */
 export function extrudeUp(
   ctx: IfcWriteContext,
@@ -197,6 +196,43 @@ export function extrudeUp(
     placement,
     upDir,
     new IFC4.IfcPositiveLengthMeasure(heightM),
+  )
+  return writeEntity(ctx, solid as unknown as { expressID: number }) as IFC4.IfcExtrudedAreaSolid
+}
+
+/**
+ * Sloped extrusion along an arbitrary direction. Used by Phase 3-9
+ * stair flights — the profile is the slab cross-section (typically
+ * `width × thickness`) and the direction is the slope tangent
+ * `(0, run, rise) / |...|` so the swept solid lays along the inclined
+ * surface from base to top of the flight.
+ *
+ * `dir` is normalised here so callers can pass a raw `(0, run, rise)`
+ * tuple without precomputing the magnitude. `depthM` is the absolute
+ * sweep length (slope length, not horizontal run).
+ */
+export function extrudeAlong(
+  ctx: IfcWriteContext,
+  profile: IFC4.IfcProfileDef,
+  dir: readonly [number, number, number],
+  depthM: number,
+): IFC4.IfcExtrudedAreaSolid {
+  const mag = Math.hypot(dir[0], dir[1], dir[2])
+  if (mag < 1e-12) {
+    throw new Error('extrudeAlong: direction vector is zero-length')
+  }
+  const unit: [number, number, number] = [
+    dir[0] / mag,
+    dir[1] / mag,
+    dir[2] / mag,
+  ]
+  const placement = worldPlacement3D(ctx)
+  const ext = direction(ctx, unit)
+  const solid = new IFC4.IfcExtrudedAreaSolid(
+    profile,
+    placement,
+    ext,
+    new IFC4.IfcPositiveLengthMeasure(depthM),
   )
   return writeEntity(ctx, solid as unknown as { expressID: number }) as IFC4.IfcExtrudedAreaSolid
 }
