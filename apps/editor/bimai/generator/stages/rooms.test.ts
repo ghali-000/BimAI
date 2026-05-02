@@ -174,6 +174,11 @@ describe('attachRoomsToUnits', () => {
   it('emits a warning when bisection fails and unit falls back', () => {
     const units = [
       // 1BR template, but unit is way too thin → fails dimension check.
+      // Phase 3-9: area 32 m² is also below the catalog's 1BR band
+      // (45-70 m²), so the variant selector synthesizes the Phase 3-7
+      // fallback AND bisection still fails on the degenerate
+      // dimensions — two warnings expected: `template_fallback_used`
+      // for the catalog miss + the bisection-failure warning.
       makeUnit({
         type: '1BR',
         polygon: [
@@ -188,8 +193,9 @@ describe('attachRoomsToUnits', () => {
     ]
     const { units: out, warnings } = attachRoomsToUnits(units)
     expect(out[0]!.rooms[0]!.kind).toBe(UNIT_SHELL_KIND)
-    expect(warnings).toHaveLength(1)
-    expect(warnings[0]).toMatch(/1BR/)
+    expect(warnings).toHaveLength(2)
+    expect(warnings.some((w) => w.includes('template_fallback_used'))).toBe(true)
+    expect(warnings.some((w) => /1BR/.test(w) && !w.includes('template_fallback_used'))).toBe(true)
   })
 
   it('emits no warnings when every unit subdivides successfully', () => {

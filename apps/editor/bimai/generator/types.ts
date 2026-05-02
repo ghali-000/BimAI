@@ -52,6 +52,25 @@ export interface UnitPlan {
    * subdivision fails, fixtures from before 3-7).
    */
   rooms: RoomPlan[]
+  /**
+   * Phase 3-9: id of the variant template the selector picked for this
+   * unit. `'fallback-${unitType}'` when no catalog entry matched. Absent
+   * for pre-3-9 fixtures and the `unitShellLayout` degenerate path.
+   * Read by the Task 11 balcony emitter and by the schedule / IFC
+   * layers that report which variant produced which unit.
+   */
+  selectedVariantId?: string
+  /**
+   * Phase 3-9: balcony attachment spec from the chosen variant. Absent
+   * when the variant has no balcony (the common case) or when balcony
+   * emission is disabled by `program.generateBalconies = false`. The
+   * Task 11 emitter projects an outdoor SlabNode + FenceNode off the
+   * unit's facade per this spec; the indoor slice tree is unaffected.
+   */
+  balcony?: {
+    attachTo: 'living' | 'bedroom' | 'kitchen'
+    depthM: number
+  }
 }
 
 /**

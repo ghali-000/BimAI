@@ -189,7 +189,9 @@ export function buildPlan(
     }
     traceGroupEnd()
 
-    const roomsAttached = attachRoomsToUnits(packed.units)
+    const roomsAttached = attachRoomsToUnits(packed.units, {
+      generateBalconies: input.program.generateBalconies ?? false,
+    })
     // [BimAI Generation Trace] — bisection results
     traceGroup(`STAGE: bisection (floor ${i})`)
     for (let k = 0; k < roomsAttached.units.length; k++) {
