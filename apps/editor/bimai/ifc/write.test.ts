@@ -1705,6 +1705,74 @@ describe('writeIFC', () => {
       )
       expect(guidsFor(a, 'IFCROOF').sort()).toEqual(guidsFor(b, 'IFCROOF').sort())
     })
+
+    // Phase 3-8 follow-up regression: the generator parents StairNodes
+    // to their fromLevelId for Pascal's edit-UX routing. The IFC writer
+    // must therefore find stairs by walking levels (not the building's
+    // direct children) — pre-3-8-follow-up scenes are still supported
+    // via a building-children fallback so the writer doesn't break on
+    // mixed-shape inputs.
+    it('emits IfcStair for a level-parented StairNode (Phase 3-8 follow-up shape)', async () => {
+      const { scene, ids } = buildSceneWithStair()
+      // Re-parent the stair from the building to the level, mirroring
+      // the generator's current emit shape.
+      const stair = scene.nodes[ids.stair as AnyNodeId]!
+      ;(stair as unknown as { parentId: string }).parentId = ids.level
+      const { text } = await runWrite(scene)
+      expect(text).toContain('IFCSTAIR(')
+      // Flights stay aggregated under the stair.
+      expect((text.match(/IFCSTAIRFLIGHT\(/g) ?? []).length).toBe(2)
+    })
+
+    it('emits both stairs when the scene has one level-parented and one building-parented (mixed shape)', async () => {
+      const { scene, ids } = buildSceneWithStair()
+      // Add a second stair parented to the building (legacy shape).
+      const stair2Id = 'stair_test_002'
+      const seg2aId = 'sseg_test_201'
+      scene.nodes[stair2Id as AnyNodeId] = {
+        object: 'node',
+        id: stair2Id,
+        type: 'stair',
+        parentId: ids.building, // legacy parent
+        name: 'Stair 2',
+        visible: true,
+        metadata: {},
+        position: [10, 0, 4],
+        rotation: 0,
+        stairType: 'straight',
+        fromLevelId: ids.level,
+        toLevelId: null,
+        width: 1.2,
+        totalRise: 3,
+        stepCount: 16,
+        thickness: 0.25,
+        children: [seg2aId],
+      } as unknown as AnyNode
+      scene.nodes[seg2aId as AnyNodeId] = {
+        object: 'node',
+        id: seg2aId,
+        type: 'stair-segment',
+        parentId: stair2Id,
+        name: 'Flight',
+        visible: true,
+        metadata: {},
+        position: [0, 0, 0],
+        rotation: 0,
+        segmentType: 'stair',
+        width: 1.2,
+        length: 3,
+        height: 3,
+        stepCount: 16,
+        attachmentSide: 'front',
+        fillToFloor: true,
+        thickness: 0.25,
+      } as unknown as AnyNode
+      // First stair parents to the level.
+      const firstStair = scene.nodes[ids.stair as AnyNodeId]!
+      ;(firstStair as unknown as { parentId: string }).parentId = ids.level
+      const { text } = await runWrite(scene)
+      expect((text.match(/IFCSTAIR\(/g) ?? []).length).toBe(2)
+    })
   })
 })
 

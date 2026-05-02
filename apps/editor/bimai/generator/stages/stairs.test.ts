@@ -178,7 +178,7 @@ describe('placeStairCores — basic shapes', () => {
 })
 
 describe('placeStairCores — stable identifiers across regen', () => {
-  it('produces the same stair id and wall ids for the same input', () => {
+  it('produces the positional stair id and wall ids; both stable across regen', () => {
     const input = {
       footprint: FOOTPRINT_30x18,
       floorCount: 3,
@@ -193,13 +193,150 @@ describe('placeStairCores — stable identifiers across regen', () => {
     }
     const a = placeStairCores(input, RESIDENTIAL_STAIR)
     const b = placeStairCores(input, RESIDENTIAL_STAIR)
+    // Phase 3-9 positional id format: `stair-core-{N}`.
+    expect(a[0]!.id).toBe('stair_core_0')
     expect(a[0]!.id).toBe(b[0]!.id)
-    expect(a[0]!.id).toMatch(/^stair_[0-9a-f]{12}$/)
     expect(a[0]!.enclosingWallIds).toHaveLength(4)
     for (const id of a[0]!.enclosingWallIds) {
-      expect(id).toMatch(/^stair-shaft_[0-9a-f]{12}$/)
+      // Wall id format: `stair-core-{N}/wall-<12hex>`. Hash bits stay
+      // canonical-edge-deterministic; only the prefix changed.
+      expect(id).toMatch(/^stair_core_0\/wall-[0-9a-f]{12}$/)
     }
     expect(a[0]!.enclosingWallIds).toEqual(b[0]!.enclosingWallIds)
+  })
+})
+
+// Phase 3-9 Task 5/6 — multi-stair-core for fire egress.
+//
+// End-plus-central strategy: `corridorLength > FIRE_EGRESS_THRESHOLD_M`
+// (default 30 m, strict >) flips a sub-threshold single-core building
+// into a 2-core building. End core is positional index 0; central
+// core is positional index 1.
+describe('placeStairCores — multi-core (Phase 3-9)', () => {
+  // Build a corridor of arbitrary `runLength` along the world x-axis,
+  // centred at world (15, 9).
+  function corridorOfLength(runLength: number): CorridorPlan {
+    return makeCorridor(
+      [
+        [15 - runLength / 2, 9],
+        [15 + runLength / 2, 9],
+      ],
+      runLength,
+    )
+  }
+
+  function makeInput(runLength: number) {
+    return {
+      footprint: [
+        [0, 0],
+        [runLength + 4, 0],
+        [runLength + 4, 18],
+        [0, 18],
+      ] as [number, number][],
+      floorCount: 3,
+      floorHeight: 3,
+      corridor: corridorOfLength(runLength),
+    }
+  }
+
+  it('1 core when corridor length is exactly at the threshold (boundary, strict >)', () => {
+    const cores = placeStairCores(makeInput(30.0), RESIDENTIAL_STAIR)
+    expect(cores).toHaveLength(1)
+    expect(cores[0]!.id).toBe('stair_core_0')
+  })
+
+  it('2 cores when corridor length is just above the threshold', () => {
+    const cores = placeStairCores(makeInput(30.01), RESIDENTIAL_STAIR)
+    expect(cores).toHaveLength(2)
+    expect(cores[0]!.id).toBe('stair_core_0')
+    expect(cores[1]!.id).toBe('stair_core_1')
+  })
+
+  it('1 core when corridor length is just below the threshold', () => {
+    const cores = placeStairCores(makeInput(29.99), RESIDENTIAL_STAIR)
+    expect(cores).toHaveLength(1)
+  })
+
+  it('central core is centred on the corridor midpoint, ±depth/2 along the run-axis', () => {
+    const cores = placeStairCores(makeInput(50), RESIDENTIAL_STAIR)
+    expect(cores).toHaveLength(2)
+    const central = cores[1]!
+    // RESIDENTIAL_STAIR.depth = 4. Centred on world (15, 9).
+    const xs = central.shaftPolygon.map((p) => p[0])
+    const ys = central.shaftPolygon.map((p) => p[1])
+    expect((Math.max(...xs) + Math.min(...xs)) / 2).toBeCloseTo(15, 6)
+    expect(Math.max(...xs) - Math.min(...xs)).toBeCloseTo(4, 6) // template.depth
+    // Width perpendicular to corridor run-axis = template.width = 2.5.
+    expect(Math.max(...ys) - Math.min(...ys)).toBeCloseTo(2.5, 6)
+  })
+
+  it('end core at index 0 keeps Phase 3-8 positioning (east-end edge alignment)', () => {
+    const cores = placeStairCores(makeInput(50), RESIDENTIAL_STAIR)
+    const end = cores[0]!
+    const xs = end.shaftPolygon.map((p) => p[0])
+    // Corridor east end at runLength=50, centre x=15 → east x=40.
+    // End core's east edge = 40; west edge = 36 (depth=4).
+    expect(Math.max(...xs)).toBeCloseTo(40, 6)
+    expect(Math.min(...xs)).toBeCloseTo(36, 6)
+  })
+
+  it('central core has the same template metrics as the end core (only position differs)', () => {
+    const [end, central] = placeStairCores(makeInput(50), RESIDENTIAL_STAIR)
+    expect(central!.width).toBe(end!.width)
+    expect(central!.depth).toBe(end!.depth)
+    expect(central!.flights).toHaveLength(end!.flights.length)
+    expect(central!.enclosingWallIds).toHaveLength(4)
+  })
+
+  it('end + central cores have disjoint shaft polygons', () => {
+    const [end, central] = placeStairCores(makeInput(50), RESIDENTIAL_STAIR)
+    const endXs = end!.shaftPolygon.map((p) => p[0])
+    const centralXs = central!.shaftPolygon.map((p) => p[0])
+    expect(Math.min(...endXs)).toBeGreaterThan(Math.max(...centralXs))
+  })
+
+  it('both cores have stable, positional ids across regen', () => {
+    const a = placeStairCores(makeInput(50), RESIDENTIAL_STAIR)
+    const b = placeStairCores(makeInput(50), RESIDENTIAL_STAIR)
+    expect(a[0]!.id).toBe('stair_core_0')
+    expect(a[1]!.id).toBe('stair_core_1')
+    expect(a[0]!.enclosingWallIds).toEqual(b[0]!.enclosingWallIds)
+    expect(a[1]!.enclosingWallIds).toEqual(b[1]!.enclosingWallIds)
+    // Cross-core wall ids are disjoint (different hash inputs).
+    const aSet = new Set(a[0]!.enclosingWallIds)
+    for (const id of a[1]!.enclosingWallIds) {
+      expect(aSet.has(id)).toBe(false)
+      expect(id).toMatch(/^stair_core_1\/wall-[0-9a-f]{12}$/)
+    }
+  })
+
+  it('honours the fireEgressThresholdM option override', () => {
+    // 25 m corridor, threshold raised to 50 → still single core.
+    const cores = placeStairCores(
+      makeInput(40),
+      RESIDENTIAL_STAIR,
+      'end-plus-central',
+      { fireEgressThresholdM: 50 },
+    )
+    expect(cores).toHaveLength(1)
+    // Same corridor, threshold lowered to 20 → two cores.
+    const cores2 = placeStairCores(
+      makeInput(25),
+      RESIDENTIAL_STAIR,
+      'end-plus-central',
+      { fireEgressThresholdM: 20 },
+    )
+    expect(cores2).toHaveLength(2)
+  })
+
+  it("'end-of-corridor' strategy clamps to single core regardless of length", () => {
+    const cores = placeStairCores(
+      makeInput(50),
+      RESIDENTIAL_STAIR,
+      'end-of-corridor',
+    )
+    expect(cores).toHaveLength(1)
+    expect(cores[0]!.id).toBe('stair_core_0')
   })
 })
 

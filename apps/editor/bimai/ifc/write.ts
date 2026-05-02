@@ -404,12 +404,28 @@ function emitBuilding(
     storeyByLevelId.set(level.id, storey)
   }
 
-  // Stairs live one tier above the level: the generator parents StairNodes
-  // to the building (not to a level — `bimai/generator/emit.ts` Task 7),
-  // and each carries `fromLevelId` pointing at the storey it starts on.
-  // Emit IfcStair + IfcStairFlights here so the storey-ID map populated
-  // by the level loop above is in scope.
-  const stairs = childrenOf<StairNode>(scene, buildingNode.id, 'stair')
+  // Stairs are level-children (Phase 3-8 follow-up: the generator
+  // parents each StairNode to its `fromLevelId` for Pascal's edit-UX
+  // routing). Walk every level (including the synthetic Roof level)
+  // and collect their stair children — pre-3-8-follow-up scenes parked
+  // stairs directly under the building, so for compatibility we also
+  // sweep the building's direct children. `fromLevelId` on the
+  // StairNode is what determines IFC storey containment regardless of
+  // where the node lives in the Pascal scene tree.
+  const stairsByLevel = levels.flatMap((level) =>
+    childrenOf<StairNode>(scene, level.id, 'stair'),
+  )
+  const stairsByBuilding = childrenOf<StairNode>(scene, buildingNode.id, 'stair')
+  // Dedup by id in case a scene has both shapes; sort for deterministic
+  // emission order (childrenOf already sorts within a parent, but the
+  // cross-parent flatMap loses that guarantee).
+  const stairById = new Map<AnyNodeId, StairNode>()
+  for (const s of [...stairsByLevel, ...stairsByBuilding]) {
+    stairById.set(s.id, s)
+  }
+  const stairs = [...stairById.values()].sort((a, b) =>
+    a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
+  )
   for (const stair of stairs) {
     emitStair(ctx, scene, stair, placement, bodyContext, storeyByLevelId)
   }

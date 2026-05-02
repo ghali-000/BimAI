@@ -238,7 +238,17 @@ export interface FloorPlan {
  * so the walls and the slab penetrations agree on identity across regen.
  */
 export interface StairCorePlan {
-  /** Stable across regen. Format `stair_<12hex>`. */
+  /**
+   * Stable across regen. Phase 3-9 format: `stair_core_{N}` where N is
+   * the positional index — 0 = end-of-corridor core, 1 = central core
+   * (when `placeStairCores` returns 2 cores under the end-plus-central
+   * strategy). Sub-threshold buildings have only `stair_core_0`.
+   * (Phase 3-8 used `stair_<12hex>` content-hashed ids; the positional
+   * form is more legible downstream — cost / IFC writers can refer to
+   * "the end core" without re-deriving a hash from inputs. Underscores
+   * not hyphens because Pascal's StairNode schema enforces
+   * `^stair_<rest>$` on node ids.)
+   */
   id: string
   /** OBB-local origin in building frame (corner of the shaft rectangle). */
   position: [number, number]

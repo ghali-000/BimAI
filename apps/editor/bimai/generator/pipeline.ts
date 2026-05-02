@@ -33,7 +33,7 @@ import { chooseFootprint, footprintParamsFrom } from './stages/footprint'
 import { planFloors } from './stages/floors'
 import { attachRoomsToUnits } from './stages/rooms'
 import { planRoof } from './stages/roof'
-import { computeStairReservation, placeStairCores } from './stages/stairs'
+import { computeStairReservations, placeStairCores } from './stages/stairs'
 import { RESIDENTIAL_STAIR } from './stages/stairs-templates'
 import { packUnits } from './stages/units'
 import type { SceneWriter } from './scene-writer'
@@ -138,16 +138,18 @@ export function buildPlan(
       }
     }
 
-    // Phase 3-8: stair shaft reservation. Carved out before packing so the
-    // packer skips the easternmost `template.depth` of the corridor strip.
-    // Single-floor buildings get no reservation (no stair core).
-    const stairReservation = computeStairReservation(
+    // Phase 3-9: stair shaft reservations. Carved out before packing
+    // so the packer skips the u-axis intervals each core occupies.
+    // 0 reservations for single-floor buildings; 1 for sub-threshold;
+    // 2 (end + central) when corridor exceeds the fire-egress
+    // threshold under the default end-plus-central strategy.
+    const stairReservations = computeStairReservations(
       RESIDENTIAL_STAIR,
       floorsResult.floorCount,
       corridor,
     )
-    if (stairReservation) {
-      corridor.reservedRegions = [stairReservation]
+    if (stairReservations.length > 0) {
+      corridor.reservedRegions = stairReservations
     }
 
     const packed = packUnits({
@@ -244,12 +246,14 @@ export function buildPlan(
     }
   }
 
-  // Phase 3-8 stairs/roof: place the stair core(s) using the canonical
-  // first-floor corridor (geometry is identical per floor in 3-8). The
-  // roof typology is locked by GATE 2 (`flat-with-parapet` — see
-  // `stages/roof.ts`). `planRoof` derives parapet polygon + per-edge
-  // canonical wall ids; the emitter (Task 7) reads them straight off
-  // the plan.
+  // Phase 3-8 stairs/roof + Phase 3-9 multi-core: place the stair
+  // core(s) using the canonical first-floor corridor (geometry is
+  // identical per floor). Returns 0/1/2 cores per the end-plus-central
+  // strategy (default) — corridor length over the fire-egress
+  // threshold (30 m) trips the second core. The roof typology is
+  // locked by GATE 2 (`flat-with-parapet` — see `stages/roof.ts`).
+  // `planRoof` derives parapet polygon + per-edge canonical wall ids;
+  // the emitter reads them straight off the plan.
   const stairs = placeStairCores(
     {
       footprint: footprint.polygon,

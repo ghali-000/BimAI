@@ -833,7 +833,7 @@ function emitStairShaftWalls(
     const a = stair.shaftPolygon[i]!
     const b = stair.shaftPolygon[(i + 1) % stair.shaftPolygon.length]!
     // Pascal's WallNode id must match `^wall_…`. The canonical edge id
-    // (`stair-shaft_<12hex>`) lives on `metadata.bimai.canonicalEdgeId`
+    // (`stair-core-{N}/wall-<12hex>`) lives on `metadata.bimai.canonicalEdgeId`
     // instead so the IFC writer (Task 9) and any future "find this
     // shaft wall across regen" workflow can resolve it without parsing
     // the Pascal id. Per-level uniqueness is provided by `generateId`.

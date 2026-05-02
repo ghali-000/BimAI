@@ -467,6 +467,114 @@ describe('runGenerator (with writer)', () => {
   })
 })
 
+// Phase 3-9 Task 5/6 — multi-stair-core for fire egress.
+//
+// End-plus-central strategy fires when the corridor exceeds the
+// `FIRE_EGRESS_THRESHOLD_M` default (30 m). The 50×30 plot's corridor
+// runs ~39 m along the long axis, which trips the threshold. A small
+// 30×18 plot stays sub-threshold.
+describe('runGenerator — multi-stair-core (Phase 3-9)', () => {
+  function buildingStub(id: string) {
+    return {
+      ...(makeNode(id, 'building', null) as unknown as Record<string, unknown>),
+      children: [],
+    } as unknown as AnyNode
+  }
+
+  // Force a multi-floor build by demanding more units than fit on one
+  // floor — otherwise demand-based floor count returns 1 and no stair
+  // is needed regardless of corridor length.
+  const PROGRAM_LARGE: Program = {
+    unitMix: [
+      { type: 'Studio', count: 4, targetArea: 35 },
+      { type: '1BR', count: 6, targetArea: 55 },
+      { type: '2BR', count: 4, targetArea: 80 },
+    ],
+    floorToFloorHeight: 3,
+  }
+
+  it('emits 2 stair cores end-to-end on a 50×30 plot (corridor > 30m)', () => {
+    const writer = createMemoryWriter({
+      nodes: { [BUILDING_ID]: buildingStub(BUILDING_ID) },
+    })
+    const out = runGenerator(baseInput({ program: PROGRAM_LARGE }), writer)
+    expect(out.ok).toBe(true)
+    if (!out.ok) return
+    expect(out.plan.stairs).toHaveLength(2)
+    expect(out.plan.stairs[0]!.id).toBe('stair_core_0')
+    expect(out.plan.stairs[1]!.id).toBe('stair_core_1')
+    // Both cores produce stair-shaft walls — cost classifier coverage.
+    const stairShaftWalls = Object.values(writer.getSnapshot().nodes).filter(
+      (n) => {
+        const meta = n.metadata as { bimai?: { wallRole?: string } } | undefined
+        return n.type === 'wall' && meta?.bimai?.wallRole === 'stair-shaft'
+      },
+    )
+    // 4 walls per core per floor × 2 cores × N floors.
+    expect(stairShaftWalls.length).toBeGreaterThan(0)
+    expect(stairShaftWalls.length % 4).toBe(0)
+    // Phase 3-8 follow-up edit-UX invariant carries through to both cores.
+    const stairs = Object.values(writer.getSnapshot().nodes).filter(
+      (n) => n.type === 'stair',
+    ) as unknown as Array<{ id: string; parentId: string | null; fromLevelId: string | null }>
+    expect(stairs).toHaveLength(2)
+    for (const s of stairs) {
+      expect(s.parentId).not.toBe(BUILDING_ID)
+      expect(s.parentId).toBe(s.fromLevelId)
+    }
+  })
+
+  it('regen produces byte-identical core ids and wall ids for both cores', () => {
+    const writerA = createMemoryWriter({
+      nodes: { [BUILDING_ID]: buildingStub(BUILDING_ID) },
+    })
+    const writerB = createMemoryWriter({
+      nodes: { [BUILDING_ID]: buildingStub(BUILDING_ID) },
+    })
+    const a = runGenerator(baseInput({ program: PROGRAM_LARGE }), writerA)
+    const b = runGenerator(baseInput({ program: PROGRAM_LARGE }), writerB)
+    expect(a.ok && b.ok).toBe(true)
+    if (!a.ok || !b.ok) return
+    // Plan-level: stair core ids and enclosingWallIds match across regen.
+    expect(a.plan.stairs.map((s) => s.id)).toEqual(b.plan.stairs.map((s) => s.id))
+    for (let i = 0; i < a.plan.stairs.length; i++) {
+      expect(a.plan.stairs[i]!.enclosingWallIds).toEqual(
+        b.plan.stairs[i]!.enclosingWallIds,
+      )
+    }
+  })
+
+  it('emits 1 stair core on a 30×18 plot (corridor ≤ 30m)', () => {
+    const writer = createMemoryWriter({
+      nodes: { [BUILDING_ID]: buildingStub(BUILDING_ID) },
+    })
+    // 30×18 plot with default 5/3/4 setbacks → footprint ~20×11; corridor
+    // along long axis runs ~20 m, well below the 30 m threshold.
+    const out = runGenerator(
+      baseInput({
+        plotPolygon: [
+          [0, 0],
+          [30, 0],
+          [30, 18],
+          [0, 18],
+        ],
+        program: {
+          unitMix: [
+            { type: '1BR', count: 6, targetArea: 55 },
+            { type: 'Studio', count: 4, targetArea: 35 },
+          ],
+          floorToFloorHeight: 3,
+        },
+      }),
+      writer,
+    )
+    expect(out.ok).toBe(true)
+    if (!out.ok) return
+    expect(out.plan.stairs).toHaveLength(1)
+    expect(out.plan.stairs[0]!.id).toBe('stair_core_0')
+  })
+})
+
 // Phase 3-5 Task 11 — apply-only seam used by the optimizer's "Load
 // into scene" button. We re-apply a plan produced by buildPlan
 // (mimicking the worker's cached plan) and assert the same

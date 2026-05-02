@@ -246,17 +246,19 @@ export function packUnits(input: PackUnitsInput): PackUnitsResult | null {
   const stripSigns = STRIP_SIGNS_BY_MODE[mode]
   const STRIP_COUNT = stripSigns.length
 
-  // Phase 3-8: honour `corridor.reservedRegions` (stair / elevator shaft
-  // footprints). 3-8 only supports end-of-strip reservations — intervals
-  // touching ±halfL — so the effect is a shorter strip range. Mid-strip
-  // skip-and-resume is the Phase 3-9 path. We accumulate the most
-  // restrictive bounds: the largest uMax among low-end reservations
-  // shrinks the start; the smallest uMin among high-end reservations
-  // shrinks the end.
+  // Phase 3-8: end-of-strip reservations shorten the usable u-range
+  // (largest uMax among low-end reservations shrinks start; smallest
+  // uMin among high-end reservations shrinks end). Phase 3-9 adds
+  // mid-strip reservations (the central stair core when corridor
+  // length > FIRE_EGRESS_THRESHOLD_M) — these are tracked as
+  // `forbiddenIntervals` and the per-strip cursor walk skips past
+  // each one. Multiple mid-strip reservations are supported in
+  // principle though Phase 3-9 only emits at most one.
   let stripStartU = -halfL
   let stripEndU = halfL
   const reservedRegions = corridor.reservedRegions ?? []
   const SHAFT_REASONS = new Set<ReservedCorridorRegion['reason']>()
+  const forbiddenIntervals: { uMin: number; uMax: number }[] = []
   for (const r of reservedRegions) {
     if (r.uMin <= -halfL + 1e-6) {
       if (r.uMax > stripStartU) stripStartU = r.uMax
@@ -265,10 +267,41 @@ export function packUnits(input: PackUnitsInput): PackUnitsResult | null {
       if (r.uMin < stripEndU) stripEndU = r.uMin
       SHAFT_REASONS.add(r.reason)
     } else {
-      // Mid-strip reservation — Phase 3-9. Refuse rather than silently
-      // dropping units across the gap.
-      return null
+      // Phase 3-9 mid-strip reservation (central stair core). Track for
+      // skip-ahead during the cursor walk. The packer never places a
+      // unit that overlaps one of these intervals.
+      forbiddenIntervals.push({ uMin: r.uMin, uMax: r.uMax })
+      SHAFT_REASONS.add(r.reason)
     }
+  }
+  // Sort forbidden intervals by uMin so the cursor-walk can find the
+  // next obstacle by linear scan (Phase 3-9 has at most one entry but
+  // the helper handles N).
+  forbiddenIntervals.sort((a, b) => a.uMin - b.uMin)
+
+  /**
+   * Given a cursor u-coordinate, return the u-coordinate of the next
+   * forbidden interval's start (the first interval whose `uMin > cursor`),
+   * or `+Infinity` if there is none. Used to compute the "effectively
+   * remaining" length before the cursor hits an obstacle.
+   */
+  function nextObstacleStart(cursor: number): number {
+    for (const f of forbiddenIntervals) {
+      if (f.uMin > cursor + 1e-9) return f.uMin
+    }
+    return Number.POSITIVE_INFINITY
+  }
+  /**
+   * Skip the cursor over any forbidden interval it currently sits inside
+   * or touches. Returns the cursor's new position. Idempotent.
+   */
+  function skipForbidden(cursor: number): number {
+    for (const f of forbiddenIntervals) {
+      if (cursor >= f.uMin - 1e-9 && cursor < f.uMax - 1e-9) {
+        return f.uMax
+      }
+    }
+    return cursor
   }
 
   // Expand unitMix into a flat queue of placement attempts. Width is the
@@ -427,8 +460,16 @@ export function packUnits(input: PackUnitsInput): PackUnitsResult | null {
     // clamp.
     for (let attempt = 0; attempt < STRIP_COUNT; attempt++) {
       const idx = (stripIdx + attempt) % STRIP_COUNT
-      const cursor = stripCursors[idx]!
-      const remaining = stripEndU - cursor
+      // Phase 3-9: skip the cursor past any forbidden interval it sits
+      // in (the central stair core's u-range). Idempotent when no mid-
+      // strip reservations apply.
+      let cursor = skipForbidden(stripCursors[idx]!)
+      stripCursors[idx] = cursor
+      // The "effectively remaining" length is the distance to the
+      // closer of stripEndU or the next forbidden interval's start.
+      const obstacleStart = nextObstacleStart(cursor)
+      const reachableEnd = Math.min(stripEndU, obstacleStart)
+      const remaining = reachableEnd - cursor
       if (remaining <= 0) continue
 
       let placedWidth: number

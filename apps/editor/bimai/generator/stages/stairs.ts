@@ -1,30 +1,54 @@
-// Phase 3-8 Task 4: Stair core placement (end-of-corridor strategy).
+// Stair core placement.
 //
-// One fire-rated stair core per multi-storey building. Single core,
-// placed at the corridor's east end (the deterministic "rear" until
-// Phase 3-9 adds primary-facade detection). Single-floor buildings get
-// no stair (`[]`).
+// Phase 3-8 (`'end-of-corridor'`): one fire-rated stair core, placed
+// at the corridor's east end. Single-floor buildings get no stair.
 //
-// Geometry:
+// Phase 3-9 (`'end-plus-central'`, default): same end core for any
+// multi-floor building. When `corridorLength > FIRE_EGRESS_THRESHOLD_M`
+// (default 30 m, configurable via `options.fireEgressThresholdM`),
+// add a second core at the corridor's geometric midpoint so the
+// max walking-distance to the nearest stair stays below code limits
+// for fire egress.
+//
+// Threshold is strictly greater-than: a 30.00 m corridor stays single
+// core; 30.01 m flips to two. Boundary cases pinned in the suite.
+//
+// Geometry (per core):
 //   - Shaft outer rectangle: `template.width × template.depth` (default
-//     2.5 m × 4.0 m), centered on the corridor centerline, east-aligned
-//     so the shaft's east edge coincides with the corridor's east end.
-//   - Shaft is `template.depth` deep along the corridor's u-axis. The
-//     packer treats this u-interval as reserved (`reservedRegions`) and
-//     the unit-strip on each side stops `template.depth` short of the
-//     east end. The shaft's perpendicular overhang into each strip
+//     2.5 m × 4.0 m). End core: east edge coincides with corridor east
+//     end. Central core: rectangle centered on the corridor midpoint,
+//     extending ±template.depth/2 along the run-axis.
+//   - The packer treats each shaft's u-interval as reserved
+//     (`reservedRegions`) — `computeStairReservations` returns one entry
+//     per core. The shaft's perpendicular overhang into each strip
 //     ((shaftWidth − corridorWidth) / 2 = 0.5 m default) sits in empty
 //     u-space the packer skipped — no unit conflict.
-//   - One `StairFlightPlan` per inter-floor span (`floorCount - 1` total).
+//   - One `StairFlightPlan` per inter-floor span per core
+//     (`floorCount - 1` × `cores.length` flights total).
 //
 // East-end pick (deterministic — Phase 3-7 door-positioning convention):
 //   - Larger world x.
 //   - Tie on x → larger world y.
-//   - "Refines to primary-facade detection in Phase 3-9."
+//   - "Refines to primary-facade detection in Phase 3-10+."
 //
-// Wall ids: canonical-edge-hashed under a per-stair seed so the same
-// plan ⇒ same `stair_<12hex>` id and same four `stair-shaft_<12hex>`
-// wall ids across regen. Pattern matches Phase 3-7's partition walls.
+// Identifier convention (Phase 3-9):
+//   - Stair core ids are positional, not content-hashed. Index 0 is
+//     ALWAYS the end-of-corridor core; index 1 is ALWAYS the central
+//     core. A sub-threshold building has only `stair_core_0`. The
+//     underscore separator (not hyphen) satisfies Pascal's StairNode
+//     schema constraint `^stair_<rest>$`.
+//   - Canonical wall edge ids embed the core id as a path prefix:
+//     `stair_core_{N}/wall-<canonicalEdgeHash>`. These are the
+//     `enclosingWallIds` exposed on `StairCorePlan`; they live on
+//     `metadata.bimai.canonicalEdgeId` of the emitted WallNode (the
+//     wall *node* id stays Pascal-schema-compliant via `generateId`).
+//     The hash is the same canonical-edge hash Phase 3-7 partition
+//     walls use; same scene + same seed produces byte-identical hashes
+//     across regenerations.
+//   - The positional convention means downstream consumers (cost,
+//     IFC, schedule) can write `cores[0]` for the end core in any
+//     building without scanning, while `cores.length > 1` flags the
+//     fire-egress branch.
 
 import { cyrb128Hex } from '../../lib/hash'
 import type { Polygon2D, Point2D } from '../../lib/envelope'
@@ -38,12 +62,34 @@ import type {
 import { type StairTemplate, buildFlightPlan } from './stairs-templates'
 
 /**
- * Strategy slot — Phase 3-8 only ships `'end-of-corridor'`. The
- * narrower union exists so the call site reads explicitly and the
- * Phase 3-9 upgrade to `'central'` / `'end-plus-central'` is a single
- * type extension + new branch.
+ * Placement strategy. `'end-of-corridor'` is the legacy Phase 3-8
+ * single-core path, kept for callers that explicitly want it.
+ * `'end-plus-central'` (default in Phase 3-9) adds the central core
+ * when corridor length exceeds the fire-egress threshold.
  */
-export type StairLocationStrategy = 'end-of-corridor'
+export type StairLocationStrategy = 'end-of-corridor' | 'end-plus-central'
+
+/**
+ * Default fire-egress threshold. EU residential mid-rise typically
+ * caps walking distance to the nearest stair at 30 m; doubling-back
+ * along a corridor hits that limit at corridor length 60 m for one
+ * end core, 30 m for two opposite ends, and ~30 m for end-plus-central
+ * (longest leg = corridor / 4 ≈ 7.5 m on a 30 m run).
+ *
+ * Override at the call site via `options.fireEgressThresholdM` when a
+ * project's local code dictates otherwise.
+ */
+export const FIRE_EGRESS_THRESHOLD_M = 30
+
+/**
+ * Optional knobs for `placeStairCores`. Strategy stays positional in
+ * the call signature for legibility; the threshold sits here because
+ * it's rarely overridden.
+ */
+export interface PlaceStairCoresOptions {
+  /** Strictly greater-than. Default: `FIRE_EGRESS_THRESHOLD_M` (30 m). */
+  fireEgressThresholdM?: number
+}
 
 export interface PlaceStairCoresInput {
   /** Top-level building outline (rectangular). Same as `BuildingPlan.footprint`. */
@@ -75,21 +121,29 @@ export function pickEastEndIndex(
 }
 
 /**
- * Compute the u-axis reservation the packer must skip. Single
- * end-of-corridor reservation in 3-8: an interval of length
- * `template.depth` touching the east end of the strip range
- * `[-halfL, +halfL]`.
+ * Compute the u-axis reservations the packer must skip. Returns one
+ * `ReservedCorridorRegion` per stair core that will be placed.
  *
- * Returns `null` for single-floor buildings (no stair → no reservation).
+ * - Single-floor buildings: `[]` (no stair → no reservation).
+ * - Sub-threshold corridors: one entry, an interval of length
+ *   `template.depth` touching the east end of `[-halfL, +halfL]`
+ *   (Phase 3-8 behaviour).
+ * - Threshold-tripped corridors (`runLength > fireEgressThresholdM`):
+ *   end reservation plus a centred reservation `[-template.depth/2,
+ *   +template.depth/2]` for the central core.
+ *
+ * Pure: doesn't touch the corridor; the packer subtracts these from
+ * its u-axis range when laying out unit strips.
  */
-export function computeStairReservation(
+export function computeStairReservations(
   template: StairTemplate,
   floorCount: number,
   corridor: CorridorPlan,
-): ReservedCorridorRegion | null {
-  if (floorCount < 2) return null
+  options: PlaceStairCoresOptions = {},
+): ReservedCorridorRegion[] {
+  if (floorCount < 2) return []
   const runLength = corridor.runLength
-  if (runLength === undefined || runLength <= template.depth) return null
+  if (runLength === undefined || runLength <= template.depth) return []
   const halfL = runLength / 2
   const eastIdx = pickEastEndIndex(corridor.centerline)
   // The corridor.ts convention: centerline[0] = center - halfL × u,
@@ -97,25 +151,74 @@ export function computeStairReservation(
   // (eastIdx=1), the +u direction is east and the reserved interval
   // is at the upper end of u. When east = centerline[0] (eastIdx=0),
   // +u points west and the reserved interval is at -halfL.
+  const out: ReservedCorridorRegion[] = []
   if (eastIdx === 1) {
-    return { uMin: halfL - template.depth, uMax: halfL, reason: 'stair-shaft' }
+    out.push({
+      uMin: halfL - template.depth,
+      uMax: halfL,
+      reason: 'stair-shaft',
+    })
+  } else {
+    out.push({
+      uMin: -halfL,
+      uMax: -halfL + template.depth,
+      reason: 'stair-shaft',
+    })
   }
-  return { uMin: -halfL, uMax: -halfL + template.depth, reason: 'stair-shaft' }
+  // Central core reservation (Phase 3-9). Strictly greater-than
+  // threshold, mirroring `placeStairCores`.
+  const threshold = options.fireEgressThresholdM ?? FIRE_EGRESS_THRESHOLD_M
+  if (runLength > threshold) {
+    const halfDepth = template.depth / 2
+    out.push({
+      uMin: -halfDepth,
+      uMax: +halfDepth,
+      reason: 'stair-shaft',
+    })
+  }
+  return out
 }
 
 /**
- * Phase 3-8 entry point. Returns 0 or 1 stair cores depending on
- * `floorCount`. Multi-stair-core for fire-egress on large plots is
- * Phase 3-9.
+ * Backwards-compat single-reservation helper. Phase 3-8 callers used
+ * `computeStairReservation` (singular) and got either one region or
+ * `null`. Kept so the existing pipeline works unchanged when the
+ * end-plus-central path doesn't fire; new callers should prefer
+ * `computeStairReservations`.
+ *
+ * @deprecated Phase 3-9. Use `computeStairReservations` to get all
+ *   reservations including the central core when threshold-tripped.
+ */
+export function computeStairReservation(
+  template: StairTemplate,
+  floorCount: number,
+  corridor: CorridorPlan,
+): ReservedCorridorRegion | null {
+  const all = computeStairReservations(template, floorCount, corridor)
+  return all[0] ?? null
+}
+
+/**
+ * Phase 3-9 entry point. Returns 0, 1, or 2 stair cores depending on
+ * `floorCount` and corridor length:
+ *  - `floorCount < 2` ⇒ `[]` (single-storey, no stair needed)
+ *  - corridor too short for shaft depth ⇒ `[]`
+ *  - corridor `≤ fireEgressThresholdM` ⇒ 1 core (end-of-corridor)
+ *  - corridor `> fireEgressThresholdM` ⇒ 2 cores (end + central)
+ *
+ * Strategy: `'end-of-corridor'` clamps to single-core behaviour even
+ * past threshold (legacy callers); `'end-plus-central'` (default)
+ * adds the central core when threshold-tripped.
+ *
+ * Index 0 is ALWAYS the end core; index 1 is ALWAYS the central core
+ * when present. Sub-threshold buildings have only `cores[0]`.
  */
 export function placeStairCores(
   input: PlaceStairCoresInput,
   template: StairTemplate,
-  // Strategy is single-valued today but the parameter exists so the
-  // call site is explicit about which gate decision it's honoring.
-  strategy: StairLocationStrategy = 'end-of-corridor',
+  strategy: StairLocationStrategy = 'end-plus-central',
+  options: PlaceStairCoresOptions = {},
 ): StairCorePlan[] {
-  if (strategy !== 'end-of-corridor') return []
   if (input.floorCount < 2) return []
   const { corridor, floorCount, floorHeight } = input
   if (corridor.runLength === undefined) return []
@@ -146,36 +249,121 @@ export function placeStairCores(
   const vy = ux
   const cx = (a[0] + b[0]) / 2
   const cy = (a[1] + b[1]) / 2
-
-  // u-coordinates of the shaft's east + west edges. East is at
-  // u = +halfL when centerline[1] is east; -halfL otherwise.
-  const eastIdx = pickEastEndIndex(corridor.centerline)
-  const eastU = eastIdx === 1 ? halfL : -halfL
-  const westU = eastIdx === 1 ? halfL - template.depth : -halfL + template.depth
-  const halfW = template.width / 2
-
-  // Shaft polygon (CCW for eastIdx=1, CW for eastIdx=0; downstream
-  // emitters key off canonical edge ids, not winding). World coords.
   const toWorld = (u: number, v: number): Point2D => [
     cx + u * ux + v * vx,
     cy + u * uy + v * vy,
   ]
+
+  const eastIdx = pickEastEndIndex(corridor.centerline)
+  const halfDepth = template.depth / 2
+  const halfW = template.width / 2
+
+  // u-coordinates of the END core's shaft edges. East is at
+  // u = +halfL when centerline[1] is east; -halfL otherwise.
+  const eastU = eastIdx === 1 ? halfL : -halfL
+  const endWestU = eastIdx === 1 ? halfL - template.depth : -halfL + template.depth
+
+  // Build the end core (positional index 0) — always present when we
+  // get here.
+  const cores: StairCorePlan[] = []
+  cores.push(
+    buildCore({
+      coreIndex: 0,
+      uCenter: (eastU + endWestU) / 2,
+      template,
+      floorCount,
+      floorHeight,
+      toWorld,
+      halfDepth,
+      halfW,
+    }),
+  )
+
+  // Central core (positional index 1) — only when strategy enables it
+  // AND corridor is strictly longer than the threshold.
+  const threshold = options.fireEgressThresholdM ?? FIRE_EGRESS_THRESHOLD_M
+  const needsCentralCore =
+    strategy === 'end-plus-central' && corridor.runLength > threshold
+  if (needsCentralCore) {
+    cores.push(
+      buildCore({
+        coreIndex: 1,
+        // Geometric midpoint of the corridor centerline ⇒ u = 0.
+        uCenter: 0,
+        template,
+        floorCount,
+        floorHeight,
+        toWorld,
+        halfDepth,
+        halfW,
+      }),
+    )
+  }
+
+  // Trace logging (opt-in via `localStorage.bimai-debug = 'true'`).
+  traceGroup('[BimAI] stair placement')
+  traceLog(
+    `corridor length: ${corridor.runLength.toFixed(2)}m, threshold: ${threshold}m`,
+  )
+  traceLog(`cores to emit: ${cores.length}`)
+  cores.forEach((core, i) => {
+    traceLog(
+      `  core ${i} (${core.id}): position=(${core.position[0].toFixed(2)}, ${core.position[1].toFixed(2)})`,
+    )
+  })
+  traceGroupEnd()
+
+  return cores
+}
+
+/**
+ * Build one StairCorePlan. Common between the end and central cores —
+ * they differ only in their `uCenter` (where on the corridor's u-axis
+ * the shaft is centred). Wall ids embed `stair-core-{N}/wall-<hash>`
+ * with the same canonical-edge hash format Phase 3-7 partition walls
+ * use; positional N keeps "the end core" stable across regen.
+ */
+function buildCore(args: {
+  coreIndex: 0 | 1
+  uCenter: number
+  template: StairTemplate
+  floorCount: number
+  floorHeight: number
+  toWorld: (u: number, v: number) => Point2D
+  halfDepth: number
+  halfW: number
+}): StairCorePlan {
+  const {
+    coreIndex,
+    uCenter,
+    template,
+    floorCount,
+    floorHeight,
+    toWorld,
+    halfDepth,
+    halfW,
+  } = args
+  const uMin = uCenter - halfDepth
+  const uMax = uCenter + halfDepth
   const shaftPolygon: Polygon2D = [
-    toWorld(westU, -halfW),
-    toWorld(eastU, -halfW),
-    toWorld(eastU, +halfW),
-    toWorld(westU, +halfW),
+    toWorld(uMin, -halfW),
+    toWorld(uMax, -halfW),
+    toWorld(uMax, +halfW),
+    toWorld(uMin, +halfW),
   ]
 
-  // Stair id — hash a stable seed (footprint lex-min vertex + corridor
-  // mode + east-side flag). Same plan ⇒ same id across regen.
-  const lexMin = lexMinVertex(input.footprint)
-  const stairSeed = `stair|${snap(lexMin[0])},${snap(lexMin[1])}|${corridor.mode ?? 'double-loaded'}|east=${eastIdx}`
-  const stairId = `stair_${cyrb128Hex(stairSeed).slice(0, 12)}`
+  // Positional core id. Index 0 = end core; index 1 = central core.
+  // Phase 3-8 used a content-hashed `stair_<12hex>` id; the positional
+  // form is more legible downstream and lets cost / IFC writers refer
+  // to "the end core" without re-deriving the hash from inputs.
+  // Underscore separators (not hyphens) so the id satisfies Pascal's
+  // StairNode `^stair_<rest>$` schema constraint.
+  const stairId = `stair_core_${coreIndex}`
 
-  // Wall ids: one per shaft polygon edge (4 in 3-8 since shafts are
-  // rectangular). Canonical-edge hash matches Phase 3-7 partition
-  // walls so anyone reading the id can tell which shaft + which side.
+  // Wall ids: one per shaft polygon edge (4 since shafts are rect).
+  // The canonical-edge hash bits stay the same as the Phase 3-7
+  // partition-wall convention, so determinism (same input ⇒ same hash)
+  // carries through.
   const enclosingWallIds: string[] = []
   for (let i = 0; i < shaftPolygon.length; i++) {
     const p = shaftPolygon[i]!
@@ -192,30 +380,15 @@ export function placeStairCores(
     )
   }
 
-  const core: StairCorePlan = {
+  return {
     id: stairId,
-    position: toWorld(westU, -halfW),
+    position: toWorld(uMin, -halfW),
     width: template.width,
     depth: template.depth,
     flights,
     shaftPolygon,
     enclosingWallIds,
   }
-
-  // Trace logging (opt-in via `localStorage.bimai-debug = 'true'`).
-  // Same gating as Phase 3-7's pipeline trace.
-  traceGroup('[BimAI] stair placement')
-  traceLog(
-    `east end (world): (${(eastIdx === 1 ? b : a)[0].toFixed(2)}, ${(eastIdx === 1 ? b : a)[1].toFixed(2)})`,
-  )
-  traceLog(
-    `shaft footprint: ${shaftPolygon.map((p) => `(${p[0].toFixed(2)}, ${p[1].toFixed(2)})`).join(' ')}`,
-  )
-  traceLog(`flights: ${flights.length} (level 0 → ${floorCount - 1})`)
-  traceLog(`stair id: ${stairId}`)
-  traceGroupEnd()
-
-  return [core]
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -225,14 +398,6 @@ const SNAP_EPSILON = 1e-4
 function snap(n: number): string {
   const r = Math.round(n / SNAP_EPSILON) * SNAP_EPSILON
   return (Math.abs(r) < SNAP_EPSILON / 2 ? 0 : r).toFixed(4)
-}
-
-function lexMinVertex(poly: ReadonlyArray<Point2D>): Point2D {
-  let lex = poly[0]!
-  for (const p of poly) {
-    if (p[0] < lex[0] || (p[0] === lex[0] && p[1] < lex[1])) lex = p
-  }
-  return lex
 }
 
 function canonicalShaftWallId(
@@ -246,6 +411,11 @@ function canonicalShaftWallId(
   const by = snap(b[1])
   const aFirst = ax < bx || (ax === bx && ay <= by)
   const [p, q] = aFirst ? [[ax, ay], [bx, by]] : [[bx, by], [ax, ay]]
+  // Phase 3-9 wall-id format: `stair-core-{N}/wall-<hash>`. The hash
+  // is the same canonical-edge hash Phase 3-7 partition walls use
+  // (cyrb128 of "<stair-id>|<minVertex>→<maxVertex>"), keyed under the
+  // positional stair id so the same scene + same seed produces the
+  // same wall id across regenerations.
   const key = `${stairId}|${p[0]},${p[1]}→${q[0]},${q[1]}`
-  return `stair-shaft_${cyrb128Hex(key).slice(0, 12)}`
+  return `${stairId}/wall-${cyrb128Hex(key).slice(0, 12)}`
 }
