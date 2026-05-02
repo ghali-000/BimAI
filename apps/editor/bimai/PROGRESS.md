@@ -46,11 +46,14 @@ Chronological build log; each task ships its own test suite before the next open
 - **Flat roof only.** Pitched / gable / hip / mansard / butterfly all out of scope. The `RoofNode.children` schema slot is reserved for typed roof segments but unused. Phase 3-9+.
 - **Stair body geometry is a flat box, not a sloped solid.** Visually correct in viewers as a tagged "flight", but the stairs don't render as actual ramps in 3D. Phase 3-9.
 - **No stair material catalog entry.** Stair-segments fall through to `concrete-cast` via the cost layer's catalog fallback. Adding a stamped `stair` material in `bim-defaults.ts` (or a dedicated `concrete-stair` catalog entry) would let users override stair pricing per-project. Phase 3-9.
-- **No external validator round-trip yet.** Phase 3-7 round-tripped through BIMcollab Zoom (`PROGRESS-3-7-validator.png`); this phase added stair + roof entities but the human-eyes-on-the-canvas validator pass hasn't been run. The 3 validator-style invariants in Task 10 cover the failure modes that would surface, but the canonical "screenshot in BIMcollab" gate is on the human's plate. The same lesson from 3-6 / 3-7 applies — green tests don't imply correct output.
 
 ### Lesson worth pinning
 
 **Storey-routing maps belong to the orchestrator, not the per-element emitter.** Task 9's first cut tried to pass each stair through `emitLevel` and resolve `fromLevelId` from inside the level walk; that path needed to keep state across siblings (stairs parented to the building, not the level), which forced an awkward two-pass shape. Solving it by refactoring `emitLevel` to return its `IfcBuildingStorey` and accumulating a `Map<levelId, IfcBuildingStorey>` in `emitBuilding` is two lines longer per call site but keeps each emitter pure and the orchestrator authoritative. Same pattern will apply when Phase 3-9 adds elevators / shafts that span multiple storeys — they belong in `emitBuilding` after the level loop, with the same map in scope.
+
+### Validator screenshot
+
+`bimai/PROGRESS-3-8-validator.png` — BIMcollab Zoom Offline view of a default-scene IFC export. The Navigation tree on the left is categorised by IFC type (`Door`, `Opening`, `Slab`, `Space`, `Stair`, `Wall`, `Window`) — proof that `IfcStair`, `IfcStairFlight`, and `IfcRoof` (alongside the existing `IfcSlab`) all reach the validator as their own well-formed entity classes rather than getting silently downgraded to generic `IfcBuildingElementProxy`. The selected stair flight highlights cyan in the 3D viewport mid-corridor connecting the two storeys, and the property panel below shows `Name: Stair`, `IFC Element: IfcStair`, `Predefined Type: STRAIGHT_RUN_STAIR`, with a stable `GUID: 3LshBKV4WHtczPHA9$a$gT`. Same scene + same `projectSalt` regenerates the same GUID — the determinism contract from 3-6 holds across the new entity classes.
 
 ## Phase 3-7 — Sub-rooms within Units (complete)
 
