@@ -38,6 +38,7 @@ export function ProgramPanel() {
   const program: Program = meta.program ?? {
     unitMix: [],
     floorToFloorHeight: 3,
+    generateBalconies: false,
   }
 
   const writeProgram = (next: Program) => {
@@ -153,6 +154,25 @@ export function ProgramPanel() {
         >
           + Add unit type
         </button>
+      </section>
+
+      {/* Phase 3-9: opt-in balcony emission. User flips the toggle and
+          clicks Generate to apply (no auto-regenerate). Default false. */}
+      <section className="border-border/50 border-t pt-3">
+        <label className="flex cursor-pointer items-center gap-2 text-sm">
+          <input
+            checked={program.generateBalconies}
+            className="h-4 w-4 cursor-pointer accent-foreground"
+            onChange={(e) =>
+              writeProgram({ ...program, generateBalconies: e.target.checked })
+            }
+            type="checkbox"
+          />
+          <span>Generate balconies for units</span>
+          <span className="ml-auto text-[10px] text-muted-foreground">
+            adds outdoor slabs + railings on facade-edge units
+          </span>
+        </label>
       </section>
 
       <section className="border-border/50 border-t pt-3 text-xs">
