@@ -575,6 +575,109 @@ describe('runGenerator — multi-stair-core (Phase 3-9)', () => {
   })
 })
 
+// Phase 3-9 Task 12 — elevator integration. Buildings ≥ 3 floors emit
+// one elevator next to stair_core_0; the building's nodes include 4
+// shaft walls per floor + 1 access door per floor + 1 cabin marker
+// (ZoneNode) on the ground level. All elevator nodes parent to a
+// level (Phase 3-8 follow-up invariant).
+describe('runGenerator — elevators (Phase 3-9 Task 12)', () => {
+  function buildingStub(id: string) {
+    return {
+      ...(makeNode(id, 'building', null) as unknown as Record<string, unknown>),
+      children: [],
+    } as unknown as AnyNode
+  }
+  // Triple the default unit demand so the demand-based floor-count
+  // strategy produces ≥ 3 floors (default scene fits ~14 units/floor;
+  // 42 demanded → 3 floors needed).
+  const PROGRAM_LARGE: Program = {
+    unitMix: [
+      { type: 'Studio', count: 12, targetArea: 35 },
+      { type: '1BR', count: 18, targetArea: 55 },
+      { type: '2BR', count: 12, targetArea: 80 },
+    ],
+    floorToFloorHeight: 3,
+  }
+
+  it('emits 1 elevator + per-floor walls/doors + cabin marker for a 3+ floor building', () => {
+    const writer = createMemoryWriter({
+      nodes: { [BUILDING_ID]: buildingStub(BUILDING_ID) },
+    })
+    const out = runGenerator(baseInput({ program: PROGRAM_LARGE }), writer)
+    expect(out.ok).toBe(true)
+    if (!out.ok) return
+    expect(out.plan.elevators).toHaveLength(1)
+    expect(out.plan.elevators[0]!.id).toBe('elevator_0')
+    const nodes = Object.values(writer.getSnapshot().nodes)
+    const shaftWalls = nodes.filter((n) => {
+      const meta = n.metadata as { bimai?: { wallRole?: string } } | undefined
+      return n.type === 'wall' && meta?.bimai?.wallRole === 'elevator-shaft'
+    })
+    // 4 walls per floor × N floors.
+    expect(shaftWalls.length).toBe(4 * out.plan.floorCount)
+    const accessDoors = nodes.filter((n) => {
+      const meta = n.metadata as { bimai?: { doorRole?: string } } | undefined
+      return n.type === 'door' && meta?.bimai?.doorRole === 'elevator-access'
+    })
+    expect(accessDoors.length).toBe(out.plan.floorCount)
+    const cabinMarkers = nodes.filter((n) => {
+      const meta = n.metadata as { bimai?: { elevatorRole?: string } } | undefined
+      return n.type === 'zone' && meta?.bimai?.elevatorRole === 'elevator-cabin'
+    })
+    expect(cabinMarkers).toHaveLength(1)
+  })
+
+  it('every elevator-related node parents to a level (Pascal edit-UX invariant)', () => {
+    const writer = createMemoryWriter({
+      nodes: { [BUILDING_ID]: buildingStub(BUILDING_ID) },
+    })
+    const out = runGenerator(baseInput({ program: PROGRAM_LARGE }), writer)
+    expect(out.ok).toBe(true)
+    if (!out.ok) return
+    const nodes = Object.values(writer.getSnapshot().nodes) as Array<
+      { id: string; type: string; parentId: string | null; metadata?: { bimai?: Record<string, unknown> } }
+    >
+    const levelIds = new Set(nodes.filter((n) => n.type === 'level').map((n) => n.id))
+    for (const n of nodes) {
+      const meta = n.metadata?.bimai as { wallRole?: string; doorRole?: string; elevatorRole?: string } | undefined
+      const isElevator =
+        meta?.wallRole === 'elevator-shaft' ||
+        meta?.elevatorRole === 'elevator-cabin'
+      // Doors parent to walls (not levels) — skip the level-parenting
+      // assertion for them. Walls and the cabin marker must parent
+      // to a level.
+      if (!isElevator) continue
+      expect(n.parentId).not.toBe(BUILDING_ID)
+      expect(levelIds.has(n.parentId as string)).toBe(true)
+    }
+  })
+
+  it('emits 0 elevators for buildings under 3 floors', () => {
+    const writer = createMemoryWriter({
+      nodes: { [BUILDING_ID]: buildingStub(BUILDING_ID) },
+    })
+    // Smaller program → 1-floor demand-based plan.
+    const out = runGenerator(
+      baseInput({
+        program: {
+          unitMix: [{ type: 'Studio', count: 2, targetArea: 35 }],
+          floorToFloorHeight: 3,
+        },
+      }),
+      writer,
+    )
+    expect(out.ok).toBe(true)
+    if (!out.ok) return
+    if (out.plan.floorCount >= 3) {
+      // Sanity: this fixture should produce a 1-floor build.
+      throw new Error(
+        `expected <3-floor build, got ${out.plan.floorCount} floors`,
+      )
+    }
+    expect(out.plan.elevators).toHaveLength(0)
+  })
+})
+
 // Phase 3-5 Task 11 — apply-only seam used by the optimizer's "Load
 // into scene" button. We re-apply a plan produced by buildPlan
 // (mimicking the worker's cached plan) and assert the same

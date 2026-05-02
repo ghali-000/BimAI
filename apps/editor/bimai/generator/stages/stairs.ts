@@ -91,6 +91,25 @@ export interface PlaceStairCoresOptions {
   fireEgressThresholdM?: number
 }
 
+/**
+ * Phase 3-9 Task 12: extra depth (m) the end stair-shaft reservation
+ * grows by when an elevator will be placed adjacent to the primary
+ * stair core. Mirrors `ELEVATOR_SHAFT_DEPTH_M` from
+ * `stages/elevators.ts`; we duplicate the constant locally so the
+ * stairs stage doesn't import from the elevators stage (one-way
+ * dependency: the elevator stage reads stair output, not vice versa).
+ */
+const ELEVATOR_RESERVATION_EXTENSION_M = 1.5
+
+export interface ComputeStairReservationsOptions extends PlaceStairCoresOptions {
+  /**
+   * When `true`, the end reservation grows by 1.5 m to make room for
+   * an elevator shaft sharing the stair's west wall. The pipeline
+   * passes `willPlaceElevator(floorCount)` here.
+   */
+  hasElevator?: boolean
+}
+
 export interface PlaceStairCoresInput {
   /** Top-level building outline (rectangular). Same as `BuildingPlan.footprint`. */
   footprint: Polygon2D
@@ -139,13 +158,22 @@ export function computeStairReservations(
   template: StairTemplate,
   floorCount: number,
   corridor: CorridorPlan,
-  options: PlaceStairCoresOptions = {},
+  options: ComputeStairReservationsOptions = {},
 ): ReservedCorridorRegion[] {
   if (floorCount < 2) return []
   const runLength = corridor.runLength
   if (runLength === undefined || runLength <= template.depth) return []
   const halfL = runLength / 2
   const eastIdx = pickEastEndIndex(corridor.centerline)
+  // Phase 3-9 Task 12: the end reservation also covers the elevator
+  // shaft when one will be placed (`options.hasElevator === true`).
+  // The elevator sits inboard of the stair, sharing the stair's
+  // corridor-side wall, so the combined service-core footprint is
+  // `template.depth + 1.5 m`.
+  const elevatorExtension = options.hasElevator
+    ? ELEVATOR_RESERVATION_EXTENSION_M
+    : 0
+  const endDepth = template.depth + elevatorExtension
   // The corridor.ts convention: centerline[0] = center - halfL × u,
   // centerline[1] = center + halfL × u. So when east = centerline[1]
   // (eastIdx=1), the +u direction is east and the reserved interval
@@ -154,14 +182,14 @@ export function computeStairReservations(
   const out: ReservedCorridorRegion[] = []
   if (eastIdx === 1) {
     out.push({
-      uMin: halfL - template.depth,
+      uMin: halfL - endDepth,
       uMax: halfL,
       reason: 'stair-shaft',
     })
   } else {
     out.push({
       uMin: -halfL,
-      uMax: -halfL + template.depth,
+      uMax: -halfL + endDepth,
       reason: 'stair-shaft',
     })
   }

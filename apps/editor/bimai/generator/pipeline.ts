@@ -33,6 +33,7 @@ import { chooseFootprint, footprintParamsFrom } from './stages/footprint'
 import { planFloors } from './stages/floors'
 import { attachRoomsToUnits } from './stages/rooms'
 import { planRoof } from './stages/roof'
+import { placeElevators, willPlaceElevator } from './stages/elevators'
 import { computeStairReservations, placeStairCores } from './stages/stairs'
 import { RESIDENTIAL_STAIR } from './stages/stairs-templates'
 import { packUnits } from './stages/units'
@@ -147,6 +148,7 @@ export function buildPlan(
       RESIDENTIAL_STAIR,
       floorsResult.floorCount,
       corridor,
+      { hasElevator: willPlaceElevator(floorsResult.floorCount) },
     )
     if (stairReservations.length > 0) {
       corridor.reservedRegions = stairReservations
@@ -272,6 +274,16 @@ export function buildPlan(
     },
     RESIDENTIAL_STAIR,
   )
+  // Phase 3-9 Task 12: place an elevator next to the primary stair
+  // core for buildings ≥ 3 floors. The elevator's reservation was
+  // already factored into the stair end reservation above (via
+  // `hasElevator: willPlaceElevator(...)`), so the unit packer
+  // already skipped the combined service-core footprint.
+  const elevators = placeElevators({
+    floorCount: floorsResult.floorCount,
+    floorHeight: floorsResult.floorHeight,
+    stairs,
+  })
   const plan: BuildingPlan = {
     generationId: nanoid(),
     footprint: footprint.polygon,
@@ -284,6 +296,7 @@ export function buildPlan(
       floorCount: floorsResult.floorCount,
       floorHeight: floorsResult.floorHeight,
     }),
+    elevators,
     warnings,
     params,
   }

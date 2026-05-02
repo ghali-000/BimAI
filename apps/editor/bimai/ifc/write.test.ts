@@ -1909,6 +1909,129 @@ describe('writeIFC', () => {
       })
     })
 
+    // Phase 3-9 Task 12 — IfcTransportElement for elevator cabins.
+    describe('elevators (Phase 3-9 Task 12)', () => {
+      it('emits IfcTransportElement (PredefinedType: ELEVATOR) for an elevator-cabin ZoneNode', async () => {
+        const { scene, ids } = buildScene({
+          withDoor: false,
+          withWindow: false,
+          withZone: false,
+        })
+        const cabinId = 'zone_elevator_001'
+        const cabin = {
+          object: 'node',
+          id: cabinId,
+          type: 'zone',
+          parentId: ids.level,
+          name: 'Elevator',
+          visible: true,
+          metadata: {
+            bimai: {
+              elevatorRole: 'elevator-cabin',
+              elevatorId: 'elevator_0',
+              stairId: 'stair_core_0',
+            },
+          },
+          polygon: [
+            [20, 0],
+            [21.5, 0],
+            [21.5, 1.5],
+            [20, 1.5],
+          ],
+          color: '#6b7280',
+        } as unknown as AnyNode
+        scene.nodes[cabinId as AnyNodeId] = cabin
+        const { text } = await runWrite(scene)
+        // Element emitted with the ELEVATOR predefined type.
+        expect(text).toContain('IFCTRANSPORTELEMENT(')
+        expect(text).toContain('.ELEVATOR.')
+        // No IfcSpace was emitted for this zone (route only fires for
+        // standard zones, not for elevator cabins).
+        const spacesAfter = (text.match(/IFCSPACE\(/g) ?? []).length
+        // The default fixture has no other zones (we passed withZone:false),
+        // so spacesAfter should be 0.
+        expect(spacesAfter).toBe(0)
+      })
+
+      it('contains the IfcTransportElement in the storey alongside slabs/walls', async () => {
+        const { scene, ids } = buildScene({
+          withDoor: false,
+          withWindow: false,
+          withZone: false,
+        })
+        const cabinId = 'zone_elevator_002'
+        scene.nodes[cabinId as AnyNodeId] = {
+          object: 'node',
+          id: cabinId,
+          type: 'zone',
+          parentId: ids.level,
+          name: 'Elevator',
+          visible: true,
+          metadata: {
+            bimai: { elevatorRole: 'elevator-cabin', elevatorId: 'elevator_0' },
+          },
+          polygon: [
+            [20, 0],
+            [21.5, 0],
+            [21.5, 1.5],
+            [20, 1.5],
+          ],
+          color: '#6b7280',
+        } as unknown as AnyNode
+        const { text } = await runWrite(scene)
+        const entities = parseEntities(text)
+        const elevId = [...entities.entries()].find(
+          ([, e]) => e.type === 'IFCTRANSPORTELEMENT',
+        )![0]
+        // Find the storey-containment relationship that references it.
+        const containment = [...entities.values()].find((e) => {
+          if (e.type !== 'IFCRELCONTAINEDINSPATIALSTRUCTURE') return false
+          const args = splitTopLevel(e.args)
+          return parseRefList(args[4]!).includes(elevId)
+        })
+        expect(
+          containment,
+          'IfcTransportElement must be contained in a storey',
+        ).toBeDefined()
+      })
+
+      it('produces deterministic GUIDs across runs (same scene + same salt)', async () => {
+        const buildBoth = () => {
+          const { scene, ids } = buildScene({
+            withDoor: false,
+            withWindow: false,
+            withZone: false,
+          })
+          const cabinId = 'zone_elevator_det'
+          scene.nodes[cabinId as AnyNodeId] = {
+            object: 'node',
+            id: cabinId,
+            type: 'zone',
+            parentId: ids.level,
+            name: 'Elevator',
+            visible: true,
+            metadata: {
+              bimai: { elevatorRole: 'elevator-cabin', elevatorId: 'elevator_0' },
+            },
+            polygon: [
+              [20, 0],
+              [21.5, 0],
+              [21.5, 1.5],
+              [20, 1.5],
+            ],
+            color: '#6b7280',
+          } as unknown as AnyNode
+          return scene
+        }
+        const { text: a } = await runWrite(buildBoth(), 'elevator-salt')
+        __resetIfcApiForTests()
+        const { text: b } = await runWrite(buildBoth(), 'elevator-salt')
+        const guidA = a.match(/IFCTRANSPORTELEMENT\('([^']+)'/)![1]
+        const guidB = b.match(/IFCTRANSPORTELEMENT\('([^']+)'/)![1]
+        expect(guidA).toEqual(guidB)
+      })
+    })
+
     it('emits both stairs when the scene has one level-parented and one building-parented (mixed shape)', async () => {
       const { scene, ids } = buildSceneWithStair()
       // Add a second stair parented to the building (legacy shape).

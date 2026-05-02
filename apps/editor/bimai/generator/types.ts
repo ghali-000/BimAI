@@ -330,6 +330,53 @@ export interface RoofPlan {
   }
 }
 
+/**
+ * Phase 3-9 Task 12: elevator plan. Pascal has no `ElevatorNode`,
+ * so the elevator is composed at emit time from existing primitives:
+ *   - 4 shaft walls per floor (`metadata.bimai.wallRole =
+ *     'elevator-shaft'`)
+ *   - 1 DoorNode per floor on the corridor-facing wall
+ *     (`metadata.bimai.doorRole = 'elevator-access'`)
+ *   - 1 ZoneNode marker on the ground level
+ *     (`metadata.bimai.elevatorRole = 'elevator-cabin'`) → mapped
+ *     to `IfcTransportElement` (PredefinedType: ELEVATOR) by the IFC
+ *     writer
+ *
+ * Stage logic (geometry, reservation extension) lives in
+ * `stages/elevators.ts`; the type is here so consumers don't need
+ * to know about the stage to read a plan.
+ */
+export interface ElevatorPlan {
+  /** Stable across regen. Phase 3-9 = `'elevator_0'` (positional). */
+  id: string
+  /** SW corner of the shaft rectangle in world coords. */
+  position: [number, number]
+  /** Metres. Phase 3-9 = 1.5. */
+  width: number
+  /** Metres. Phase 3-9 = 1.5. */
+  depth: number
+  /** 4-vertex CCW shaft outer polygon in world coords. */
+  shaftPolygon: [number, number][]
+  /**
+   * Index into `shaftPolygon` for the corridor-facing edge (where
+   * the per-floor DoorNode goes). Phase 3-9 always returns 0.
+   */
+  doorEdgeIndex: number
+  /**
+   * Stable canonical ids per shaft polygon edge. Format
+   * `elevator_{N}/wall-<12hex>`; mirrors the Phase 3-9 stair-core
+   * wall id convention.
+   */
+  enclosingWallIds: string[]
+  /**
+   * Stair core this elevator shares its service-core wall with —
+   * always `'stair_core_0'` in Phase 3-9. Used by the IFC writer's
+   * containment routing and by cost / schedule layers grouping
+   * "primary core" elements.
+   */
+  stairId: string
+}
+
 export interface BuildingPlan {
   /** Stamped onto every generated node's `metadata.bimai.generationId`. */
   generationId: string
@@ -350,6 +397,14 @@ export interface BuildingPlan {
    * `'flat-with-parapet'` for residential mid-rise.
    */
   roof: RoofPlan
+  /**
+   * Phase 3-9: elevators. `[]` for buildings under
+   * `ELEVATOR_MIN_FLOORS` (3 storeys) or for degenerate stair-less
+   * plans. Multi-elevator support is forward-looking — Phase 3-9
+   * ships at most one elevator per building, attached to the
+   * primary `stair_core_0`.
+   */
+  elevators: ElevatorPlan[]
   /** Non-fatal issues, e.g. "could not place all studio units". */
   warnings: string[]
   /**

@@ -552,8 +552,17 @@ function emitLevel(
   // packer's strip depth pushes them outside the area-band gate.
   const zones = childrenOf<ZoneNode>(scene, levelNode.id, 'zone')
   const unitZones: ZoneNode[] = []
+  const elevatorCabinZones: ZoneNode[] = []
   const roomZonesByUnitId = new Map<string, ZoneNode[]>()
   for (const zone of zones) {
+    // Phase 3-9 Task 12: elevator cabin marker → IfcTransportElement,
+    // not IfcSpace. Detect via metadata.bimai.elevatorRole.
+    const bimaiMeta = (zone.metadata as { bimai?: { elevatorRole?: string } } | undefined)
+      ?.bimai
+    if (bimaiMeta?.elevatorRole === 'elevator-cabin') {
+      elevatorCabinZones.push(zone)
+      continue
+    }
     const meta = getRoomZoneMeta(zone)
     if (meta) {
       const list = roomZonesByUnitId.get(meta.unitId) ?? []
@@ -562,6 +571,15 @@ function emitLevel(
     } else {
       unitZones.push(zone)
     }
+  }
+  // Emit one IfcTransportElement per elevator-cabin zone, contained
+  // in the storey alongside slabs / walls / spaces. PredefinedType is
+  // ELEVATOR; no Representation (the cabin is the absence of structure
+  // inside the shaft walls — viewers render the shaft walls + door
+  // and tag the entity as an elevator).
+  for (const cabin of elevatorCabinZones) {
+    const ent = emitElevatorCabin(ctx, cabin, placement)
+    contained.push(ent as unknown as IFC4.IfcProduct)
   }
   for (const unitZone of unitZones) {
     const unitSpace = emitZone(ctx, unitZone, placement, bodyContext, elevation, floorToFloorHeightM)
@@ -1151,6 +1169,46 @@ function emitRoof(
     IFC4.IfcRoofTypeEnum.FLAT_ROOF,
   )
   return writeEntity(ctx, roof as unknown as { expressID: number }) as IFC4.IfcRoof
+}
+
+/**
+ * Emit an IfcTransportElement (PredefinedType: ELEVATOR) for an
+ * elevator-cabin marker ZoneNode (Phase 3-9 Task 12). No
+ * Representation — the cabin is the absence of structure inside the
+ * shaft walls; the IFC entity is the semantic tag viewers (BIMcollab
+ * Zoom, Solibri) display in the spatial tree under the storey. The
+ * shaft walls + per-floor doors are emitted via the standard wall /
+ * door paths and contain themselves in the storey naturally.
+ *
+ * Cabin id is the ZoneNode id; GUID derived deterministically via
+ * `ifcGuid(ctx, zoneNode.id, '')` so regen produces stable IFC ids.
+ */
+function emitElevatorCabin(
+  ctx: IfcWriteContext,
+  zoneNode: ZoneNode,
+  parentPlacement: IFC4.IfcLocalPlacement,
+): IFC4.IfcTransportElement {
+  // Anchor at the zone's polygon centroid lifted to 0 in IFC Z. The
+  // cabin has no body; this just gives the entity a placement so
+  // viewers can locate it in the storey's coordinate frame.
+  const cx =
+    zoneNode.polygon.reduce((s, p) => s + p[0], 0) / zoneNode.polygon.length
+  const cy =
+    zoneNode.polygon.reduce((s, p) => s + p[1], 0) / zoneNode.polygon.length
+  const origin: Ifc3D = pascalToIfc([cx, 0, cy])
+  const placement = localPlacement(ctx, origin, parentPlacement)
+  const elevator = new IFC4.IfcTransportElement(
+    ifcGuid(ctx, zoneNode.id, ''),
+    ctx.ownerHistory,
+    new IFC4.IfcLabel(zoneNode.name ?? 'Elevator'),
+    null,
+    null,
+    placement,
+    null,
+    null,
+    IFC4.IfcTransportElementTypeEnum.ELEVATOR,
+  )
+  return writeEntity(ctx, elevator as unknown as { expressID: number }) as IFC4.IfcTransportElement
 }
 
 // ── psets ───────────────────────────────────────────────────────────────────

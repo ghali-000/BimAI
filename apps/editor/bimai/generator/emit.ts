@@ -39,6 +39,7 @@ import { tagAsGenerated } from './tag'
 import type {
   BuildingPlan,
   CorridorPlan,
+  ElevatorPlan,
   FloorPlan,
   NodeOp,
   RoofPlan,
@@ -101,6 +102,19 @@ export function emitBuildingPlan(
   for (const stair of plan.stairs) {
     ops.push(...emitStairCore(stair, plan, levelIdByFloor, ctx))
   }
+  // Phase 3-9 Task 12: elevator cabin markers. One ZoneNode per
+  // elevator, parented to the GROUND level (level 0). The cabin
+  // spans no body — the marker polygon is the shaft interior
+  // (1.5 × 1.5 m). The IFC writer detects
+  // `metadata.bimai.elevatorRole === 'elevator-cabin'` and maps it
+  // to `IfcTransportElement` (PredefinedType: ELEVATOR) instead of
+  // the default IfcSpace.
+  const groundLevelId = levelIdByFloor[0]
+  if (groundLevelId) {
+    for (const elevator of plan.elevators ?? []) {
+      ops.push(emitElevatorCabin(groundLevelId, elevator, ctx))
+    }
+  }
   // Phase 3-8 Task 7: roof emission. A synthetic "Roof" LevelNode at
   // `level: floorCount` parks the parapet walls + RoofNode marker at
   // top-of-top-slab elevation (Pascal walls have no Y of their own —
@@ -142,6 +156,16 @@ function emitFloor(
   // resolve which wall belongs to which shaft edge.
   for (const stair of plan.stairs) {
     ops.push(...emitStairShaftWalls(levelId, floor.level, stair, plan, ctx))
+  }
+
+  // Phase 3-9 Task 12: elevator shaft walls + per-floor access doors.
+  // Same wall-emission pattern as stair shafts; the cabin marker
+  // (one ZoneNode per elevator) is emitted once at ground level
+  // outside this floor loop.
+  for (const elevator of plan.elevators ?? []) {
+    ops.push(
+      ...emitElevatorOnFloor(levelId, floor.level, elevator, plan, ctx),
+    )
   }
 
   // Walls. We pre-allocate IDs so doors/windows can reference them.
@@ -872,6 +896,121 @@ function emitStairShaftWalls(
     ops.push({ node: tagAsGenerated(node, ctx.generationId), parentId: levelId })
   }
   return ops
+}
+
+// ── Elevators (Phase 3-9 Task 12) ────────────────────────────────────────────
+
+/**
+ * Emit one floor's worth of elevator structure: 4 shaft walls + 1
+ * per-floor access door on the corridor-facing wall. Mirrors the
+ * stair-shaft-wall pattern: each polygon edge becomes a WallNode
+ * with `metadata.bimai.wallRole = 'elevator-shaft'`, and the
+ * canonical edge id (`elevator_{N}/wall-<12hex>`) is parked on
+ * `metadata.bimai.canonicalEdgeId` so consumers can resolve a
+ * specific shaft wall across regen without floating-point math.
+ *
+ * Door emission picks the wall whose `shaftEdgeIndex` equals the
+ * elevator's `doorEdgeIndex`, then emits a DoorNode at the wall's
+ * midpoint with `metadata.bimai.doorRole = 'elevator-access'`.
+ */
+function emitElevatorOnFloor(
+  levelId: AnyNodeId,
+  levelIndex: number,
+  elevator: ElevatorPlan,
+  plan: BuildingPlan,
+  ctx: EmitContext,
+): NodeOp[] {
+  const ops: NodeOp[] = []
+  const wallHeight = plan.floorHeight
+  const wallByEdgeIndex = new Map<number, WallNode>()
+  for (let i = 0; i < elevator.shaftPolygon.length; i++) {
+    const a = elevator.shaftPolygon[i]!
+    const b = elevator.shaftPolygon[(i + 1) % elevator.shaftPolygon.length]!
+    const id = generateId('wall')
+    const node: WallNode = {
+      object: 'node',
+      id,
+      type: 'wall',
+      parentId: levelId,
+      visible: true,
+      start: [a[0], a[1]],
+      end: [b[0], b[1]],
+      thickness: DEFAULT_WALL_THICKNESS_M,
+      height: wallHeight,
+      children: [],
+      frontSide: 'interior',
+      backSide: 'interior',
+      metadata: {
+        bimai: {
+          wallRole: 'elevator-shaft',
+          elevatorId: elevator.id,
+          shaftEdgeIndex: i,
+          canonicalEdgeId: elevator.enclosingWallIds[i],
+          levelIndex,
+          stairId: elevator.stairId,
+        },
+      },
+    } as unknown as WallNode
+    ops.push({ node: tagAsGenerated(node, ctx.generationId), parentId: levelId })
+    wallByEdgeIndex.set(i, node)
+  }
+
+  // Per-floor access door on the corridor-facing wall.
+  const doorWall = wallByEdgeIndex.get(elevator.doorEdgeIndex)
+  if (doorWall) {
+    const a = elevator.shaftPolygon[elevator.doorEdgeIndex]!
+    const b =
+      elevator.shaftPolygon[
+        (elevator.doorEdgeIndex + 1) % elevator.shaftPolygon.length
+      ]!
+    const mid: Point2D = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]
+    const doorOp = emitDoorOnWall(doorWall, mid, plan, ctx, {
+      metadata: {
+        doorRole: 'elevator-access',
+        elevatorId: elevator.id,
+        levelIndex,
+      },
+    })
+    if (doorOp) ops.push(doorOp)
+  }
+  return ops
+}
+
+/**
+ * Emit one cabin marker per elevator. ZoneNode parented to the
+ * GROUND level (level 0) — the marker represents the elevator
+ * "carrier" semantically, mapped by the IFC writer to a single
+ * `IfcTransportElement` (PredefinedType: ELEVATOR) regardless of
+ * how many floors the shaft spans. Polygon = the shaft interior so
+ * 2D plan views can show the cabin's footprint without re-deriving
+ * the geometry from the shaft walls.
+ */
+function emitElevatorCabin(
+  groundLevelId: AnyNodeId,
+  elevator: ElevatorPlan,
+  ctx: EmitContext,
+): NodeOp {
+  const id = generateId('zone')
+  const node: ZoneNode = {
+    object: 'node',
+    id,
+    type: 'zone',
+    name: 'Elevator',
+    parentId: groundLevelId,
+    visible: true,
+    polygon: elevator.shaftPolygon.map(
+      (p) => [p[0], p[1]] as [number, number],
+    ),
+    color: '#6b7280',
+    metadata: {
+      bimai: {
+        elevatorRole: 'elevator-cabin',
+        elevatorId: elevator.id,
+        stairId: elevator.stairId,
+      },
+    },
+  } as unknown as ZoneNode
+  return { node: tagAsGenerated(node, ctx.generationId), parentId: groundLevelId }
 }
 
 /**
