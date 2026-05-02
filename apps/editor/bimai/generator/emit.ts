@@ -961,11 +961,19 @@ function emitStairCore(
   const fromLevelId = levelIdByFloor[stair.flights[0]!.fromLevel] ?? null
   const toLevelId =
     levelIdByFloor[stair.flights.at(-1)!.toLevel] ?? null
+  // Phase 3-8 follow-up: parent the StairNode to its starting level, not
+  // the building. Pascal's edit UX (scene tree → click → edit panel) only
+  // routes selection for nodes parented under a level. The IFC writer
+  // continues to resolve storey containment via `fromLevelId`, so the
+  // export tree is unchanged. Defensive fallback to the building when
+  // fromLevelId fails to resolve (shouldn't happen in practice — every
+  // floor allocates a level id before stair emission runs).
+  const stairParentId = (fromLevelId ?? ctx.buildingId) as AnyNodeId
   const stairNode: StairNode = {
     object: 'node',
     id: stairId,
     type: 'stair',
-    parentId: ctx.buildingId,
+    parentId: stairParentId,
     visible: true,
     position: [stair.position[0], 0, stair.position[1]],
     rotation: rotationY,
@@ -999,7 +1007,7 @@ function emitStairCore(
   } as unknown as StairNode
   ops.push({
     node: tagAsGenerated(stairNode, ctx.generationId),
-    parentId: ctx.buildingId,
+    parentId: stairParentId,
   })
   return ops
 }

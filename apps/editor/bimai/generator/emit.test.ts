@@ -1009,7 +1009,7 @@ describe('emitBuildingPlan — stair core (Phase 3-8 Task 5)', () => {
     expect(ops.filter((o) => o.node.type === 'stair-segment')).toHaveLength(0)
   })
 
-  it('emits exactly one StairNode parented to the building, with N-1 segment children', () => {
+  it('emits exactly one StairNode parented to its starting level, with N-1 segment children', () => {
     const plan = buildStairPlan(4)
     expect(plan.stairs.length).toBe(1)
     const ops = emitBuildingPlan(plan, {
@@ -1019,8 +1019,12 @@ describe('emitBuildingPlan — stair core (Phase 3-8 Task 5)', () => {
     const stairs = ops.filter((o) => o.node.type === 'stair')
     expect(stairs).toHaveLength(1)
     const stair = stairs[0]!.node as unknown as StairNodeShape
-    expect(stairs[0]!.parentId).toBe(BUILDING_ID)
-    expect(stair.parentId).toBe(BUILDING_ID)
+    // Phase 3-8 follow-up: StairNode parents to its `fromLevelId`, not the
+    // building, so Pascal's scene-tree → click → edit-panel routing works.
+    expect(stair.fromLevelId).not.toBeNull()
+    expect(stairs[0]!.parentId).toBe(stair.fromLevelId)
+    expect(stair.parentId).toBe(stair.fromLevelId)
+    expect(stair.parentId).not.toBe(BUILDING_ID)
 
     const segments = ops.filter((o) => o.node.type === 'stair-segment')
     expect(segments).toHaveLength(3) // floorCount-1
@@ -1491,6 +1495,86 @@ describe('emitBuildingPlan — roof (Phase 3-8 Task 7)', () => {
       if (op.node.type === 'roof' || isRoofLevel || isParapet) {
         expect(isGenerated(op.node, GEN_ID)).toBe(true)
       }
+    }
+  })
+})
+
+// Phase 3-8 follow-up — Pascal edit-UX routing invariants. Pascal's
+// scene-tree → click → edit-panel flow only fires for nodes parented
+// under a level. Anything generated that lands directly under the
+// building is unreachable from the standard tool. Pin the three
+// element classes that previously had this bug (or were at risk).
+describe('emitBuildingPlan — Pascal edit-UX parenting invariants', () => {
+  it('every emitted StairNode parents to its starting level (fromLevelId), not the building', () => {
+    const plan = buildStairPlan(3)
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const levelIds = new Set(
+      ops.filter((o) => o.node.type === 'level').map((o) => o.node.id),
+    )
+    const stairOps = ops.filter((o) => o.node.type === 'stair')
+    expect(stairOps.length).toBeGreaterThan(0)
+    for (const op of stairOps) {
+      const stair = op.node as unknown as StairNodeShape
+      expect(stair.parentId).not.toBe(BUILDING_ID)
+      expect(op.parentId).not.toBe(BUILDING_ID)
+      expect(stair.fromLevelId).not.toBeNull()
+      expect(stair.parentId).toBe(stair.fromLevelId)
+      expect(op.parentId).toBe(stair.fromLevelId)
+      expect(levelIds.has(stair.parentId as string)).toBe(true)
+    }
+  })
+
+  it('every emitted parapet WallNode parents to a roof-level LevelNode (not the building)', () => {
+    const plan = buildPlannedRoofSingleFloor()
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const roofLevelIds = new Set(
+      ops
+        .filter((o) => {
+          const meta = o.node.metadata as { bimai?: { roofRole?: string } }
+          return o.node.type === 'level' && meta?.bimai?.roofRole === 'roof-level'
+        })
+        .map((o) => o.node.id),
+    )
+    expect(roofLevelIds.size).toBe(1)
+    const parapets = ops.filter((o) => {
+      const meta = o.node.metadata as { bimai?: { wallRole?: string } }
+      return o.node.type === 'wall' && meta?.bimai?.wallRole === 'parapet'
+    })
+    expect(parapets.length).toBeGreaterThan(0)
+    for (const op of parapets) {
+      expect(op.parentId).not.toBe(BUILDING_ID)
+      expect(roofLevelIds.has(op.parentId as string)).toBe(true)
+      expect(roofLevelIds.has((op.node as { parentId: string }).parentId)).toBe(true)
+    }
+  })
+
+  it('every emitted RoofNode parents to a roof-level LevelNode (not the building)', () => {
+    const plan = buildPlannedRoofSingleFloor()
+    const ops = emitBuildingPlan(plan, {
+      buildingId: BUILDING_ID,
+      generationId: GEN_ID,
+    })
+    const roofLevelIds = new Set(
+      ops
+        .filter((o) => {
+          const meta = o.node.metadata as { bimai?: { roofRole?: string } }
+          return o.node.type === 'level' && meta?.bimai?.roofRole === 'roof-level'
+        })
+        .map((o) => o.node.id),
+    )
+    expect(roofLevelIds.size).toBe(1)
+    const roofs = ops.filter((o) => o.node.type === 'roof')
+    expect(roofs.length).toBeGreaterThan(0)
+    for (const op of roofs) {
+      expect(op.parentId).not.toBe(BUILDING_ID)
+      expect(roofLevelIds.has(op.parentId as string)).toBe(true)
+      expect(roofLevelIds.has((op.node as { parentId: string }).parentId)).toBe(true)
     }
   })
 })
