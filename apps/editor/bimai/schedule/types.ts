@@ -79,15 +79,27 @@ export interface ScheduleRoomBreakdown {
   hallways: ScheduleRoomBucket
 }
 
+export interface ScheduleRoof {
+  /** Sum of polygon areas for slabs parented to a synthetic Roof level
+   *  (Phase 3-8 Task 7). Reported separately from GEA — the roof is not a
+   *  habitable floor and including it would inflate the per-floor view and
+   *  the cost layer's typology multipliers (which are €/m² × habitable GEA).
+   *  0 today; non-zero once the emitter produces an explicit roof slab. */
+  area: number
+}
+
 export interface ScheduleResult {
-  /** Number of LevelNodes counted. */
+  /** Number of habitable LevelNodes counted. The synthetic Roof level
+   *  emitted in Phase 3-8 Task 7 is excluded — see `roof.area` instead. */
   floorCount: number
   totals: ScheduleTotals
-  /** Sorted by `level` asc. */
+  /** Sorted by `level` asc. Excludes the synthetic Roof level. */
   byFloor: ScheduleByFloor[]
   residential: ScheduleResidential
   /** Phase 3-7. Aggregated from room zones (excludes unit-shell). */
   roomBreakdown: ScheduleRoomBreakdown
+  /** Phase 3-8 Task 8. Roof slab area, reported separately from GEA. */
+  roof: ScheduleRoof
   /** Non-fatal observations — e.g. "level N has no slab", "zone X has no unitType". */
   warnings: string[]
 }

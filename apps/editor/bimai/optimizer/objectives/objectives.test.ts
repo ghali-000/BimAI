@@ -51,6 +51,7 @@ function makeSchedule(byUnitType: Array<[string, number, number]>): ScheduleResu
       })),
     },
     roomBreakdown: emptyRoomBreakdown(),
+    roof: { area: 0 },
     warnings: [],
   }
 }
@@ -58,7 +59,7 @@ function makeSchedule(byUnitType: Array<[string, number, number]>): ScheduleResu
 function makeCost(perUnit: number, totalUnits: number): CostResult {
   const total = perUnit * totalUnits
   return {
-    perComponent: { walls: { exterior: 0, interior: 0, loadBearing: 0 }, slabs: 0, openings: { doors: 0, windows: 0 } },
+    perComponent: { walls: { exterior: 0, interior: 0, loadBearing: 0 }, slabs: 0, openings: { doors: 0, windows: 0 }, stairs: 0 },
     perComponentTotal: total * 0.6,
     typology: { mep: 0, finishes: 0, generalConditions: 0, contingency: 0 },
     typologyTotal: total * 0.4,

@@ -86,7 +86,7 @@ export function CostPanel() {
 // ── Sections ────────────────────────────────────────────────────────────────
 
 function AboveGradeSection({ cost }: { cost: CostResult }) {
-  const { walls, slabs, openings } = cost.perComponent
+  const { walls, slabs, openings, stairs } = cost.perComponent
   return (
     <section className="flex flex-col gap-1.5">
       <h3 className="font-medium text-muted-foreground text-xs uppercase tracking-wide">
@@ -100,6 +100,7 @@ function AboveGradeSection({ cost }: { cost: CostResult }) {
       <Indent label="Slabs" amount={slabs} />
       <Indent label="Openings — doors" amount={openings.doors} />
       <Indent label="Openings — windows" amount={openings.windows} />
+      {stairs > 0 && <Indent label="Stairs" amount={stairs} />}
       <Subtotal label="Per-component subtotal" amount={cost.perComponentTotal} />
     </section>
   )

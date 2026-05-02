@@ -30,8 +30,11 @@ import type {
   BuildingNode,
   DoorNode,
   LevelNode,
+  RoofNode,
   SiteNode,
   SlabNode,
+  StairNode,
+  StairSegmentNode,
   WallNode,
   WindowNode,
   ZoneNode,
@@ -384,8 +387,11 @@ function emitBuilding(
   // only user-drawn levels (none tagged) still ships every level.
   const hasTaggedLevel = allLevels.some((l) => isGenerated(l))
   const levels = hasTaggedLevel ? allLevels.filter((l) => isGenerated(l)) : allLevels
+  // Track storey by level id so post-level emitters (stairs) can resolve
+  // their containment storey from `fromLevelId`.
+  const storeyByLevelId = new Map<AnyNodeId, IFC4.IfcBuildingStorey>()
   for (const level of levels) {
-    emitLevel(
+    const storey = emitLevel(
       ctx,
       scene,
       level,
@@ -395,6 +401,17 @@ function emitBuilding(
       materials,
       floorToFloorHeightM,
     )
+    storeyByLevelId.set(level.id, storey)
+  }
+
+  // Stairs live one tier above the level: the generator parents StairNodes
+  // to the building (not to a level — `bimai/generator/emit.ts` Task 7),
+  // and each carries `fromLevelId` pointing at the storey it starts on.
+  // Emit IfcStair + IfcStairFlights here so the storey-ID map populated
+  // by the level loop above is in scope.
+  const stairs = childrenOf<StairNode>(scene, buildingNode.id, 'stair')
+  for (const stair of stairs) {
+    emitStair(ctx, scene, stair, placement, bodyContext, storeyByLevelId)
   }
 }
 
@@ -407,7 +424,7 @@ function emitLevel(
   bodyContext: IFC4.IfcGeometricRepresentationSubContext,
   materials: MaterialRegistry,
   floorToFloorHeightM: number,
-): void {
+): IFC4.IfcBuildingStorey {
   const elevation = elevationForLevel(levelNode.level, floorToFloorHeightM)
   const placement = localPlacement(ctx, [0, 0, elevation], parentPlacement)
   const storey = new IFC4.IfcBuildingStorey(
@@ -566,6 +583,20 @@ function emitLevel(
     aggregate(ctx, unitSpace, roomSpaces, `${unitZone.id}-rooms`)
   }
 
+  // Roof markers (Phase 3-8 Task 7) are RoofNodes parented to a synthetic
+  // Roof level; the marker itself carries `metadata.bimai.roofRole ===
+  // 'roof-marker'` and has no segment children in BimAI usage. Emit one
+  // IfcRoof per marker, contained in the storey alongside slabs/walls.
+  // The actual roof slab is already a SlabNode under this same level,
+  // so the IfcRoof acts as a semantic tag — viewers (Solibri/BIMcollab)
+  // pick it up to colour-code "roof" elements without us needing to
+  // model a full roof body.
+  const roofs = childrenOf<RoofNode>(scene, levelNode.id, 'roof')
+  for (const roofNode of roofs) {
+    const ent = emitRoof(ctx, roofNode, placement)
+    contained.push(ent as unknown as IFC4.IfcProduct)
+  }
+
   if (contained.length > 0) {
     const rel = new IFC4.IfcRelContainedInSpatialStructure(
       ifcGuid(ctx, levelNode.id, 'contains'),
@@ -577,6 +608,7 @@ function emitLevel(
     )
     writeEntity(ctx, rel as unknown as { expressID: number })
   }
+  return storey
 }
 
 // ── building elements ───────────────────────────────────────────────────────
@@ -902,6 +934,176 @@ function emitOpening(
     filling,
   )
   writeEntity(ctx, fills as unknown as { expressID: number })
+}
+
+// ── stairs and roof (Phase 3-8) ─────────────────────────────────────────────
+
+/**
+ * Emit an IfcStair container plus one IfcStairFlight per child
+ * StairSegmentNode, aggregate the flights under the stair, and contain
+ * the stair in the storey indicated by `stair.fromLevelId`. Falls back
+ * to the first storey in the map when `fromLevelId` is unset or the
+ * matching storey can't be resolved (e.g. a stair pointing at a level
+ * that was filtered out as the untagged Level 0).
+ *
+ * The IfcStair itself carries no Representation — it's a grouping
+ * element; viewers walk IfcRelAggregates to find the geometry on its
+ * IfcStairFlight children.
+ */
+function emitStair(
+  ctx: IfcWriteContext,
+  scene: SceneSnapshot,
+  stairNode: StairNode,
+  parentPlacement: IFC4.IfcLocalPlacement,
+  bodyContext: IFC4.IfcGeometricRepresentationSubContext,
+  storeyByLevelId: Map<AnyNodeId, IFC4.IfcBuildingStorey>,
+): void {
+  const origin: Ifc3D = pascalToIfc(stairNode.position as Pascal3D)
+  const placement = localPlacement(ctx, origin, parentPlacement)
+
+  const stair = new IFC4.IfcStair(
+    ifcGuid(ctx, stairNode.id, ''),
+    ctx.ownerHistory,
+    new IFC4.IfcLabel(stairNode.name ?? 'Stair'),
+    null,
+    null,
+    placement,
+    null,
+    null,
+    IFC4.IfcStairTypeEnum.STRAIGHT_RUN_STAIR,
+  )
+  writeEntity(ctx, stair as unknown as { expressID: number })
+
+  // Emit one IfcStairFlight per child segment; aggregate under the stair.
+  const segments = childrenOf<StairSegmentNode>(scene, stairNode.id, 'stair-segment')
+  const flights: IFC4.IfcStairFlight[] = []
+  for (const seg of segments) {
+    const flight = emitStairFlight(ctx, seg, placement, bodyContext)
+    flights.push(flight)
+  }
+  if (flights.length > 0) {
+    aggregate(ctx, stair, flights, `${stairNode.id}-flights`)
+  }
+
+  // Contain the IfcStair in the storey corresponding to `fromLevelId`.
+  // If that level was filtered out (e.g. untagged Level 0), pick the
+  // first available storey so the stair still attaches to the spatial
+  // tree rather than dangling.
+  let storey: IFC4.IfcBuildingStorey | undefined
+  if (stairNode.fromLevelId) {
+    storey = storeyByLevelId.get(stairNode.fromLevelId as AnyNodeId)
+  }
+  if (!storey) {
+    const first = storeyByLevelId.values().next()
+    if (!first.done) storey = first.value
+  }
+  if (storey) {
+    const rel = new IFC4.IfcRelContainedInSpatialStructure(
+      ifcGuid(ctx, stairNode.id, 'stair-contains'),
+      ctx.ownerHistory,
+      new IFC4.IfcLabel('Contained'),
+      null,
+      [stair] as unknown as IFC4.IfcProduct[],
+      storey as unknown as IFC4.IfcSpatialElement,
+    )
+    writeEntity(ctx, rel as unknown as { expressID: number })
+  }
+}
+
+/**
+ * Emit one IfcStairFlight for a StairSegmentNode. The body is a
+ * straight rectangular extrusion sized by `width × length`, raised by
+ * `height` (a landing has `height = 0`, so we extrude by `thickness`
+ * instead — landings still need a visible plate). NumberOfRiser /
+ * RiserHeight / TreadLength are filled when the segment is a stair
+ * (segmentType === 'stair').
+ *
+ * Pascal segment position is local to the parent StairNode; the
+ * IfcLocalPlacement chain naturally composes that under the stair.
+ */
+function emitStairFlight(
+  ctx: IfcWriteContext,
+  segNode: StairSegmentNode,
+  parentPlacement: IFC4.IfcLocalPlacement,
+  bodyContext: IFC4.IfcGeometricRepresentationSubContext,
+): IFC4.IfcStairFlight {
+  const origin: Ifc3D = pascalToIfc(segNode.position as Pascal3D)
+  const placement = localPlacement(ctx, origin, parentPlacement)
+
+  const isStair = segNode.segmentType === 'stair'
+  const width = segNode.width ?? 1
+  const length = segNode.length ?? 1
+  // Landings get a flat plate at the segment's slab thickness;
+  // stair flights extrude by their full vertical rise.
+  const extrudeHeight = isStair
+    ? Math.max(segNode.height ?? 0, 0.01)
+    : Math.max(segNode.thickness ?? 0.2, 0.01)
+
+  // Centre the rectangle on the segment origin so the placement
+  // origin coincides with the visual centroid (matches the renderer
+  // convention for stair-segment meshes).
+  const profile = polygonProfile(
+    ctx,
+    rectanglePolygonCentred(width, length),
+    'StairFlightBody',
+  )
+  const solid = extrudeUp(ctx, profile, extrudeHeight)
+  const rep = bodyRepresentation(ctx, bodyContext, solid)
+  const shape = productShape(ctx, [rep])
+
+  const stepCount = segNode.stepCount ?? 0
+  const hasSteps = isStair && stepCount > 0
+  const numberOfRiser = hasSteps ? stepCount : null
+  const numberOfTreads = hasSteps ? Math.max(stepCount - 1, 1) : null
+  const riserHeight = hasSteps && (segNode.height ?? 0) > 0
+    ? new IFC4.IfcPositiveLengthMeasure((segNode.height ?? 0) / stepCount)
+    : null
+  const treadLength = hasSteps
+    ? new IFC4.IfcPositiveLengthMeasure(length / Math.max(stepCount - 1, 1))
+    : null
+
+  const flight = new IFC4.IfcStairFlight(
+    ifcGuid(ctx, segNode.id, ''),
+    ctx.ownerHistory,
+    new IFC4.IfcLabel(segNode.name ?? (isStair ? 'StairFlight' : 'Landing')),
+    null,
+    null,
+    placement,
+    shape,
+    null,
+    numberOfRiser,
+    numberOfTreads,
+    riserHeight,
+    treadLength,
+  )
+  return writeEntity(ctx, flight as unknown as { expressID: number }) as IFC4.IfcStairFlight
+}
+
+/**
+ * Emit a marker IfcRoof (Phase 3-8 Task 7). The Pascal RoofNode is a
+ * container with empty children in BimAI usage — it tags the synthetic
+ * Roof level so viewers can filter "roof" semantically. No body: the
+ * actual roof slab is a sibling SlabNode handled via `emitSlab`.
+ */
+function emitRoof(
+  ctx: IfcWriteContext,
+  roofNode: RoofNode,
+  parentPlacement: IFC4.IfcLocalPlacement,
+): IFC4.IfcRoof {
+  const origin: Ifc3D = pascalToIfc(roofNode.position as Pascal3D)
+  const placement = localPlacement(ctx, origin, parentPlacement)
+  const roof = new IFC4.IfcRoof(
+    ifcGuid(ctx, roofNode.id, ''),
+    ctx.ownerHistory,
+    new IFC4.IfcLabel(roofNode.name ?? 'Roof'),
+    null,
+    null,
+    placement,
+    null,
+    null,
+    IFC4.IfcRoofTypeEnum.FLAT_ROOF,
+  )
+  return writeEntity(ctx, roof as unknown as { expressID: number }) as IFC4.IfcRoof
 }
 
 // ── psets ───────────────────────────────────────────────────────────────────

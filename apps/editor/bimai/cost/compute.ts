@@ -164,6 +164,7 @@ export function computeCost(
   let slabs = 0
   let doors = 0
   let windows = 0
+  let stairs = 0
 
   for (const node of Object.values(scene.nodes)) {
     if (!isGenerated(node)) continue
@@ -205,6 +206,34 @@ export function computeCost(
         windows += priceFlat(bim.costOverride, mat, ctx, node.id, 'window')
         break
       }
+      case 'stair-segment': {
+        // Phase 3-8 Task 8. Stair flights/landings are priced as a tread
+        // surface (width × length) × €/m². bim-defaults does not stamp
+        // stair-segments today, so `mat` is normally undefined here — fall
+        // back to the catalog's concrete-cast price so the cost is non-zero
+        // and audit-friendly. Override beats catalog beats fallback.
+        const seg = node as unknown as { width?: number; length?: number }
+        const width = Number.isFinite(seg.width) ? (seg.width as number) : 0
+        const length = Number.isFinite(seg.length) ? (seg.length as number) : 0
+        const m2 = width * length
+        if (m2 === 0) {
+          ctx.warnings.push(
+            `stair-segment ${node.id}: zero surface area, skipped`,
+          )
+          break
+        }
+        const stairMat: BimAIMaterial | undefined =
+          mat ?? BIMAI_MATERIALS['concrete-cast']
+        const ratePerM2 = pricePerM2(
+          bim.costOverride,
+          stairMat,
+          ctx,
+          node.id,
+          'slab',
+        )
+        stairs += m2 * ratePerM2
+        break
+      }
       default:
         break
     }
@@ -214,6 +243,7 @@ export function computeCost(
     walls,
     slabs,
     openings: { doors, windows },
+    stairs,
   }
   const perComponentTotal =
     walls.exterior +
@@ -221,7 +251,8 @@ export function computeCost(
     walls.loadBearing +
     slabs +
     doors +
-    windows
+    windows +
+    stairs
 
   // ── Typology categories ───────────────────────────────────────────────────
   const gea = sched.totals.gea

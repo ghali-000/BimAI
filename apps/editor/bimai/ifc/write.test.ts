@@ -1383,6 +1383,329 @@ describe('writeIFC', () => {
       expect(unitRoomAggs.length).toBe(3) // Studio contributes 0.
     })
   })
+
+  // ── Phase 3-8 Task 9: stairs and roof ────────────────────────────────────
+  //
+  // StairNodes are parented to the building (one tier above the level)
+  // with `fromLevelId` pointing at the storey they start on; child
+  // StairSegmentNodes (stair flights / landings) are parented to the
+  // stair. RoofNodes live one per synthetic Roof level as marker
+  // containers — no body, no segments in BimAI usage.
+  //
+  // IFC mapping:
+  //   - IfcStair (no Representation) contained in `fromLevelId`'s storey
+  //   - IfcStair ←IfcRelAggregates→ IfcStairFlight × N
+  //   - IfcRoof (no Representation) contained in its level's storey
+  describe('stairs and roof (Phase 3-8 Task 9)', () => {
+    function parseEntities(text: string): Map<number, { type: string; args: string }> {
+      const entities = new Map<number, { type: string; args: string }>()
+      const ENT_RE = /^#(\d+)=([A-Z0-9_]+)\(((?:[^()]|\([^()]*\))*)\)/gm
+      for (const m of text.matchAll(ENT_RE)) {
+        entities.set(Number(m[1]), { type: m[2]!, args: m[3]! })
+      }
+      return entities
+    }
+
+    function parseRefList(s: string): number[] {
+      const inner = s.replace(/^\(/, '').replace(/\)$/, '')
+      if (inner === '' || inner === '$') return []
+      return inner
+        .split(',')
+        .map((p) => p.trim())
+        .filter((p) => p.startsWith('#'))
+        .map((p) => Number(p.slice(1)))
+    }
+
+    function buildSceneWithStair(): { scene: SceneSnapshot; ids: SceneIds & { stair: string; seg1: string; seg2: string } } {
+      const { scene, ids } = buildScene({ withDoor: false, withWindow: false, withZone: false })
+      const stairId = 'stair_test_001'
+      const seg1Id = 'sseg_test_001'
+      const seg2Id = 'sseg_test_002'
+      const stair = {
+        object: 'node',
+        id: stairId,
+        type: 'stair',
+        parentId: ids.building,
+        name: 'Stair',
+        visible: true,
+        metadata: {},
+        position: [3, 0, 4],
+        rotation: 0,
+        stairType: 'straight',
+        fromLevelId: ids.level,
+        toLevelId: null,
+        width: 1.2,
+        totalRise: 3,
+        stepCount: 16,
+        thickness: 0.25,
+        children: [seg1Id, seg2Id],
+      } as unknown as AnyNode
+      const seg1 = {
+        object: 'node',
+        id: seg1Id,
+        type: 'stair-segment',
+        parentId: stairId,
+        name: 'Flight',
+        visible: true,
+        metadata: {},
+        position: [0, 0, 0],
+        rotation: 0,
+        segmentType: 'stair',
+        width: 1.2,
+        length: 3,
+        height: 1.5,
+        stepCount: 8,
+        attachmentSide: 'front',
+        fillToFloor: true,
+        thickness: 0.25,
+      } as unknown as AnyNode
+      const seg2 = {
+        object: 'node',
+        id: seg2Id,
+        type: 'stair-segment',
+        parentId: stairId,
+        name: 'Landing',
+        visible: true,
+        metadata: {},
+        position: [0, 1.5, 3],
+        rotation: 0,
+        segmentType: 'landing',
+        width: 1.2,
+        length: 1.2,
+        height: 0,
+        stepCount: 0,
+        attachmentSide: 'front',
+        fillToFloor: false,
+        thickness: 0.2,
+      } as unknown as AnyNode
+      scene.nodes[stairId as AnyNodeId] = stair
+      scene.nodes[seg1Id as AnyNodeId] = seg1
+      scene.nodes[seg2Id as AnyNodeId] = seg2
+      return { scene, ids: { ...ids, stair: stairId, seg1: seg1Id, seg2: seg2Id } }
+    }
+
+    it('emits IfcStair with two IfcStairFlights aggregated under it', async () => {
+      const { scene } = buildSceneWithStair()
+      const { text } = await runWrite(scene)
+      expect(text).toContain('IFCSTAIR(')
+      const flights = (text.match(/IFCSTAIRFLIGHT\(/g) ?? []).length
+      expect(flights).toBe(2)
+
+      const entities = parseEntities(text)
+      const stair = [...entities.values()].find((e) => e.type === 'IFCSTAIR')!
+      // IfcRelAggregates whose RelatingObject is the IfcStair
+      const aggs = [...entities.entries()].filter(([, e]) => e.type === 'IFCRELAGGREGATES')
+      const stairAgg = aggs.find(([, e]) => {
+        const args = splitTopLevel(e.args)
+        const relating = Number(args[4]!.slice(1))
+        return entities.get(relating) === stair
+      })
+      expect(stairAgg, 'IfcStair should aggregate its flights').toBeDefined()
+      const aggArgs = splitTopLevel(stairAgg![1].args)
+      const related = parseRefList(aggArgs[5]!)
+      expect(related.length).toBe(2)
+      expect(related.every((id) => entities.get(id)?.type === 'IFCSTAIRFLIGHT')).toBe(true)
+    })
+
+    it('contains the IfcStair in the storey identified by fromLevelId', async () => {
+      const { scene } = buildSceneWithStair()
+      const { text } = await runWrite(scene)
+      const entities = parseEntities(text)
+      const containments = [...entities.values()].filter(
+        (e) => e.type === 'IFCRELCONTAINEDINSPATIALSTRUCTURE',
+      )
+      // The stair gets its own containment rel; find one whose
+      // RelatedElements contains the IfcStair.
+      const stairId = [...entities.entries()].find(([, e]) => e.type === 'IFCSTAIR')![0]
+      const stairContainment = containments.find((e) => {
+        const args = splitTopLevel(e.args)
+        const related = parseRefList(args[4]!)
+        return related.includes(stairId)
+      })
+      expect(stairContainment).toBeDefined()
+      const containmentArgs = splitTopLevel(stairContainment!.args)
+      const storeyId = Number(containmentArgs[5]!.slice(1))
+      expect(entities.get(storeyId)?.type).toBe('IFCBUILDINGSTOREY')
+    })
+
+    it('emits IfcRoof for a RoofNode marker parented to a level', async () => {
+      const { scene, ids } = buildScene({
+        withDoor: false,
+        withWindow: false,
+        withZone: false,
+      })
+      const roofId = 'roof_test_001'
+      const roof = {
+        object: 'node',
+        id: roofId,
+        type: 'roof',
+        parentId: ids.level,
+        name: 'Roof',
+        visible: true,
+        metadata: { bimai: { roofRole: 'roof-marker' } },
+        position: [0, 0, 0],
+        rotation: 0,
+        children: [],
+      } as unknown as AnyNode
+      scene.nodes[roofId as AnyNodeId] = roof
+
+      const { text } = await runWrite(scene)
+      expect(text).toContain('IFCROOF(')
+
+      // The IfcRoof must be in the storey's containment relationship.
+      const entities = parseEntities(text)
+      const roofIfcId = [...entities.entries()].find(([, e]) => e.type === 'IFCROOF')![0]
+      const containment = [...entities.values()].find(
+        (e) => e.type === 'IFCRELCONTAINEDINSPATIALSTRUCTURE',
+      )!
+      const args = splitTopLevel(containment.args)
+      const related = parseRefList(args[4]!)
+      expect(related).toContain(roofIfcId)
+    })
+
+    it('routes stair containment to fromLevelId in a multi-storey building', async () => {
+      // Two storeys, stair anchored to level 1 (the upper). The
+      // writer must look up the storey by `fromLevelId`, not pick the
+      // first/last storey blindly.
+      const { scene, ids } = buildScene({ withDoor: false, withWindow: false, withZone: false })
+      // Add a second level under the same building.
+      const level1Id = 'level_test_002' as AnyNodeId
+      scene.nodes[level1Id] = {
+        object: 'node', id: level1Id, type: 'level', parentId: ids.building,
+        name: 'Level 1', visible: true, metadata: {}, level: 1, children: [],
+      } as unknown as AnyNode
+      // Stair anchored to level 1.
+      const stairId = 'stair_multi_001'
+      scene.nodes[stairId as AnyNodeId] = {
+        object: 'node', id: stairId, type: 'stair', parentId: ids.building,
+        name: 'Stair', visible: true, metadata: {},
+        position: [0, 3, 0], rotation: 0, stairType: 'straight',
+        fromLevelId: level1Id, toLevelId: null,
+        width: 1.2, totalRise: 3, stepCount: 16, thickness: 0.25,
+        children: [],
+      } as unknown as AnyNode
+
+      const { text } = await runWrite(scene)
+      const entities = parseEntities(text)
+
+      const stairIfcId = [...entities.entries()].find(([, e]) => e.type === 'IFCSTAIR')![0]
+      const containment = [...entities.values()].find((e) => {
+        if (e.type !== 'IFCRELCONTAINEDINSPATIALSTRUCTURE') return false
+        const args = splitTopLevel(e.args)
+        return parseRefList(args[4]!).includes(stairIfcId)
+      })
+      expect(containment, 'stair must be contained in a storey').toBeDefined()
+      const containmentArgs = splitTopLevel(containment!.args)
+      const storeyId = Number(containmentArgs[5]!.slice(1))
+      const storeyArgs = splitTopLevel(entities.get(storeyId)!.args)
+      // Storey.Name is positional 2 — assert it's "Level 1", not "Level 0".
+      expect(storeyArgs[2]).toContain('Level 1')
+    })
+
+    it('emits IfcStair with no flights and no stair-rooted IfcRelAggregates when the StairNode has zero segments', async () => {
+      const { scene, ids } = buildScene({ withDoor: false, withWindow: false, withZone: false })
+      const stairId = 'stair_empty_001'
+      scene.nodes[stairId as AnyNodeId] = {
+        object: 'node', id: stairId, type: 'stair', parentId: ids.building,
+        name: 'Stair', visible: true, metadata: {},
+        position: [0, 0, 0], rotation: 0, stairType: 'straight',
+        fromLevelId: ids.level, toLevelId: null,
+        width: 1, totalRise: 0, stepCount: 0, thickness: 0.25,
+        children: [],
+      } as unknown as AnyNode
+
+      const { text } = await runWrite(scene)
+      const entities = parseEntities(text)
+
+      // Exactly one IfcStair, zero IfcStairFlights.
+      const stairs = [...entities.values()].filter((e) => e.type === 'IFCSTAIR')
+      expect(stairs.length).toBe(1)
+      const flights = [...entities.values()].filter((e) => e.type === 'IFCSTAIRFLIGHT')
+      expect(flights.length).toBe(0)
+
+      // No IfcRelAggregates whose RelatingObject is the IfcStair (an
+      // empty IfcRelAggregates would fail validators expecting at
+      // least one RelatedObject).
+      const stairIfcId = [...entities.entries()].find(([, e]) => e.type === 'IFCSTAIR')![0]
+      const stairAggs = [...entities.values()].filter((e) => {
+        if (e.type !== 'IFCRELAGGREGATES') return false
+        const args = splitTopLevel(e.args)
+        return Number(args[4]!.slice(1)) === stairIfcId
+      })
+      expect(stairAggs.length).toBe(0)
+    })
+
+    it('IfcRoof on the synthetic Roof level coexists with the roof slab in the storey containment', async () => {
+      // Phase 3-8 Task 7 emits a synthetic Roof level holding a roof
+      // slab + a marker RoofNode. The IFC writer must emit BOTH the
+      // IfcSlab (geometry) and the IfcRoof (semantic tag) into the
+      // same storey containment list — neither should crowd out the
+      // other.
+      const { scene, ids } = buildScene({ withDoor: false, withWindow: false, withZone: false })
+      // Tag the existing level as the roof level via metadata.
+      const level = scene.nodes[ids.level as AnyNodeId] as unknown as { metadata: Record<string, unknown> }
+      level.metadata = { bimai: { roofRole: 'roof-level' } }
+      // Add a RoofNode marker under the same level.
+      const roofId = 'roof_marker_001'
+      scene.nodes[roofId as AnyNodeId] = {
+        object: 'node', id: roofId, type: 'roof', parentId: ids.level,
+        name: 'Roof', visible: true,
+        metadata: { bimai: { roofRole: 'roof-marker' } },
+        position: [0, 0, 0], rotation: 0, children: [],
+      } as unknown as AnyNode
+
+      const { text } = await runWrite(scene)
+      const entities = parseEntities(text)
+
+      const slabId = [...entities.entries()].find(([, e]) => e.type === 'IFCSLAB')?.[0]
+      const roofIfcId = [...entities.entries()].find(([, e]) => e.type === 'IFCROOF')?.[0]
+      expect(slabId).toBeDefined()
+      expect(roofIfcId).toBeDefined()
+
+      const containment = [...entities.values()].find(
+        (e) => e.type === 'IFCRELCONTAINEDINSPATIALSTRUCTURE',
+      )!
+      const args = splitTopLevel(containment.args)
+      const related = parseRefList(args[4]!)
+      expect(related).toContain(slabId)
+      expect(related).toContain(roofIfcId)
+    })
+
+    it('produces deterministic GUIDs for stair, flights, and roof across runs', async () => {
+      const buildBoth = () => {
+        const { scene, ids } = buildSceneWithStair()
+        const roofId = 'roof_test_002'
+        scene.nodes[roofId as AnyNodeId] = {
+          object: 'node',
+          id: roofId,
+          type: 'roof',
+          parentId: ids.level,
+          name: 'Roof',
+          visible: true,
+          metadata: {},
+          position: [0, 0, 0],
+          rotation: 0,
+          children: [],
+        } as unknown as AnyNode
+        return scene
+      }
+      const { text: a } = await runWrite(buildBoth(), 'stair-salt')
+      __resetIfcApiForTests()
+      const { text: b } = await runWrite(buildBoth(), 'stair-salt')
+
+      const guidsFor = (text: string, type: string): string[] => {
+        const re = new RegExp(`${type}\\('([^']+)'`, 'g')
+        return [...text.matchAll(re)].map((m) => m[1]!)
+      }
+      expect(guidsFor(a, 'IFCSTAIR\\(').sort()).toEqual(
+        guidsFor(b, 'IFCSTAIR\\(').sort(),
+      )
+      expect(guidsFor(a, 'IFCSTAIRFLIGHT').sort()).toEqual(
+        guidsFor(b, 'IFCSTAIRFLIGHT').sort(),
+      )
+      expect(guidsFor(a, 'IFCROOF').sort()).toEqual(guidsFor(b, 'IFCROOF').sort())
+    })
+  })
 })
 
 /**

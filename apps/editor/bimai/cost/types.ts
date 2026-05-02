@@ -34,6 +34,13 @@ export interface CostPerComponent {
   walls: CostByWallCategory
   slabs: number
   openings: CostByOpeningCategory
+  /** Phase 3-8 Task 8. Sum of stair-segment costs (treads + landings).
+   *  Priced as surface area × concrete €/m² — `bim-defaults` does not stamp
+   *  stair segments today, so the cost layer falls back to the catalog's
+   *  `concrete-cast` price unless the segment carries an explicit
+   *  `costOverride.perM2`. Broken out separately so the user can audit
+   *  what egress cores contribute to the build. */
+  stairs: number
 }
 
 export interface CostTypology {

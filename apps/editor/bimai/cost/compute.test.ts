@@ -430,6 +430,64 @@ describe('computeCost — building scoping', () => {
   })
 })
 
+describe('computeCost — stair-segment (Phase 3-8 Task 8)', () => {
+  it('prices a stair-segment as width × length × concrete-cast €/m² fallback', () => {
+    const lvl = tagGen(
+      makeNode('level_0', 'level', 'building_1' as AnyNodeId, { level: 0 }),
+    )
+    const stair = tagGen(
+      makeNode('stair_0', 'stair', 'building_1' as AnyNodeId, {
+        position: [0, 0, 0],
+      }),
+    )
+    const seg = tagGen(
+      makeNode('seg_0', 'stair-segment', 'stair_0' as AnyNodeId, {
+        width: 1.2,
+        length: 3,
+      }),
+    )
+    const r = computeCost(buildScene([lvl, stair, seg]), {
+      buildingId: 'building_1' as AnyNodeId,
+    })
+    const expected = 1.2 * 3 * BIMAI_MATERIALS['concrete-cast'].costPerM2!
+    expect(r.perComponent.stairs).toBeCloseTo(expected, 5)
+    // The stair-segment subtotal also flows into perComponentTotal.
+    expect(r.perComponentTotal).toBeCloseTo(expected, 5)
+  })
+
+  it('respects costOverride.perM2 on a stair-segment', () => {
+    const lvl = tagGen(
+      makeNode('level_0', 'level', 'building_1' as AnyNodeId, { level: 0 }),
+    )
+    const seg = tagGen(
+      withBIM(
+        makeNode('seg_o', 'stair-segment', 'level_0' as AnyNodeId, {
+          width: 1,
+          length: 4,
+        }),
+        { costOverride: { perM2: 500 } },
+      ),
+    )
+    const r = computeCost(buildScene([lvl, seg]))
+    expect(r.perComponent.stairs).toBe(1 * 4 * 500)
+  })
+
+  it('skips a zero-area stair-segment with a warning', () => {
+    const lvl = tagGen(
+      makeNode('level_0', 'level', 'building_1' as AnyNodeId, { level: 0 }),
+    )
+    const seg = tagGen(
+      makeNode('seg_zero', 'stair-segment', 'level_0' as AnyNodeId, {
+        width: 0,
+        length: 3,
+      }),
+    )
+    const r = computeCost(buildScene([lvl, seg]))
+    expect(r.perComponent.stairs).toBe(0)
+    expect(r.warnings.some((w) => w.includes('seg_zero'))).toBe(true)
+  })
+})
+
 describe('computeCost — ratios', () => {
   it('perM2OfGEA = totalProjectCost / GEA, perUnit = totalProjectCost / unitCount', () => {
     const r = computeCost(oneFloorScene())

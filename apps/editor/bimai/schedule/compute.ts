@@ -55,7 +55,17 @@ export function computeSchedule(
   const warnings: string[] = []
 
   // ── Pass 1: collect generated levels / slabs / zones in scope ──────────────
+  // Phase 3-8 Task 7: the emitter inserts a synthetic "Roof" LevelNode so
+  // parapet walls inherit the correct top-of-top-slab elevation (WallNode has
+  // no Y of its own — it inherits from its parent level). That synthetic
+  // level is not a habitable floor; including it in byFloor would inflate
+  // `floorCount`, leave a level with no slab/zones in the per-floor table,
+  // and trigger the "no slab" warning every time. We filter it here via the
+  // `metadata.bimai.roofRole === 'roof-level'` tag stamped at emit time.
+  // Roof-parented slabs (none today, but reserved) flow into the separate
+  // `roofArea` accumulator below rather than into GEA.
   const levels: LevelNode[] = []
+  const roofLevelIds = new Set<AnyNodeId>()
   const slabs: SlabNode[] = []
   const zones: ZoneNode[] = []
 
@@ -64,10 +74,23 @@ export function computeSchedule(
     if (buildingId !== undefined && !isDescendantOf(node, buildingId, scene.nodes)) {
       continue
     }
-    if (node.type === 'level') levels.push(node as LevelNode)
-    else if (node.type === 'slab') slabs.push(node as SlabNode)
+    if (node.type === 'level') {
+      const bimai = readBimai(node)
+      if (bimai.roofRole === 'roof-level') {
+        roofLevelIds.add(node.id)
+      } else {
+        levels.push(node as LevelNode)
+      }
+    } else if (node.type === 'slab') slabs.push(node as SlabNode)
     else if (node.type === 'zone') zones.push(node as ZoneNode)
   }
+
+  // Roof slab area — slabs parented to a synthetic Roof level. Today the
+  // emitter does not produce one (the topmost floor's slab doubles as the
+  // roof deck), but the accumulator is wired up so a future "explicit roof
+  // slab" emission lands here without a second compute pass change. Roof
+  // slabs are routed away from the per-floor GEA aggregation below.
+  let roofArea = 0
 
   // ── Pass 2: bucket slabs + zones by parent level ───────────────────────────
   // Levels are the per-floor anchor; slabs and zones reference their level
@@ -79,6 +102,11 @@ export function computeSchedule(
   const slabsByLevel = new Map<AnyNodeId, SlabNode[]>()
   for (const s of slabs) {
     const parent = s.parentId as AnyNodeId | null
+    if (parent && roofLevelIds.has(parent)) {
+      // Roof-parented slab: contributes to roofArea, not per-floor GEA.
+      roofArea += polyArea(s.polygon)
+      continue
+    }
     if (!parent || !levelById.has(parent)) {
       warnings.push(`slab ${s.id}: parent level not found, dropped from schedule`)
       continue
@@ -199,6 +227,7 @@ export function computeSchedule(
       byUnitType,
     },
     roomBreakdown,
+    roof: { area: roofArea },
     warnings,
   }
 }

@@ -401,6 +401,53 @@ describe('computeSchedule', () => {
     })
   })
 
+  // ── Phase 3-8 Task 8: synthetic Roof level handling ──────────────────────
+  describe('synthetic Roof level (Phase 3-8)', () => {
+    function makeRoofLevel(id: string, level: number, parentId: AnyNodeId): AnyNode {
+      return tagAsGenerated(
+        makeNode(id, 'level', parentId, {
+          level,
+          metadata: { bimai: { roofRole: 'roof-level' } },
+        }),
+        'gen-A',
+      )
+    }
+
+    it('excludes the synthetic Roof level from floorCount, byFloor and GEA', () => {
+      // Two habitable floors plus a synthetic Roof level (no slab or zones).
+      const scene = buildScene([
+        makeLevel('level_0', 0, 'building_1' as AnyNodeId),
+        makeLevel('level_1', 1, 'building_1' as AnyNodeId),
+        makeRoofLevel('level_roof', 2, 'building_1' as AnyNodeId),
+        makeSlab('slab_0', 'level_0' as AnyNodeId, SQUARE_10),
+        makeSlab('slab_1', 'level_1' as AnyNodeId, SQUARE_10),
+        makeZone('z_0', 'level_0' as AnyNodeId, RECT_5x4, '1BR'),
+        makeZone('z_1', 'level_1' as AnyNodeId, RECT_5x4, '1BR'),
+      ])
+      const r = computeSchedule(scene)
+      expect(r.floorCount).toBe(2)
+      expect(r.byFloor.map((f) => f.level)).toEqual([0, 1])
+      expect(r.totals.gea).toBe(200)
+      expect(r.roof.area).toBe(0)
+      // Critically: the roof level must NOT trigger the "no slab" warning.
+      expect(r.warnings.some((w) => w.includes('no slab'))).toBe(false)
+    })
+
+    it('routes a roof-parented slab into roof.area, not GEA', () => {
+      const scene = buildScene([
+        makeLevel('level_0', 0, 'building_1' as AnyNodeId),
+        makeRoofLevel('level_roof', 1, 'building_1' as AnyNodeId),
+        makeSlab('slab_0', 'level_0' as AnyNodeId, SQUARE_10), // 100 m² GEA
+        makeSlab('slab_roof', 'level_roof' as AnyNodeId, RECT_5x4), // 20 m² roof
+      ])
+      const r = computeSchedule(scene)
+      expect(r.totals.gea).toBe(100)
+      expect(r.roof.area).toBe(20)
+      // Roof slab parent is filtered, so it must not warn as orphan.
+      expect(r.warnings.some((w) => w.includes('slab_roof'))).toBe(false)
+    })
+  })
+
   it('efficiency in (0, 1) for realistic mid-rise input', () => {
     // 100 m² floor with 70 m² of zones — 0.7 efficiency, healthy mid-rise.
     const ZONE_70: [number, number][] = [

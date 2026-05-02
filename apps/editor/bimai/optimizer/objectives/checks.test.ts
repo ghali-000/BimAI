@@ -42,6 +42,7 @@ const SCHEDULE: ScheduleResult = {
   byFloor: [],
   residential: { totalUnits: 1, avgUnitArea: 80, byUnitType: [] },
   roomBreakdown: emptyRoomBreakdown(),
+  roof: { area: 0 },
   warnings: [],
 }
 
@@ -50,6 +51,7 @@ const COST: CostResult = {
     walls: { exterior: 0, interior: 0, loadBearing: 0 },
     slabs: 0,
     openings: { doors: 0, windows: 0 },
+    stairs: 0,
   },
   perComponentTotal: 0,
   typology: { mep: 0, finishes: 0, generalConditions: 0, contingency: 0 },
