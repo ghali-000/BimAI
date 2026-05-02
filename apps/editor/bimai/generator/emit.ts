@@ -33,6 +33,7 @@ import type { Polygon2D, Point2D } from '../lib/envelope'
 import { roomColor, unitColor } from '../lib/unit-colors'
 import { traceGroup, traceGroupEnd, traceLog } from './debug'
 import { generateId } from './ids'
+import { emitBalconies } from './stages/balconies'
 import { asRectangle } from './stages/corridor'
 import { tagAsGenerated } from './tag'
 import type {
@@ -206,6 +207,13 @@ function emitFloor(
       ops.push(op)
     }
   }
+
+  // Phase 3-9 Task 11: balcony slabs + railings. Each unit with a
+  // populated `balcony` field (set by Task 10's variant selector when
+  // `program.generateBalconies = true`) gets one outdoor SlabNode and
+  // three FenceNodes. Both parent to the level — Phase 3-8 follow-up
+  // invariant; the fence/slab linkage lives in metadata.
+  ops.push(...emitBalconies(floor.units, ctx, levelId))
 
   return ops
 }
